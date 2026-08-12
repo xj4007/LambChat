@@ -179,6 +179,7 @@ async def test_cancelled_lazy_e2b_create_completes_manager_binding_and_cache(
         return None
 
     monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "e2b")
+    manager._platform = "e2b"
     monkeypatch.setattr(sandbox_module, "run_blocking_io", gated_run_blocking_io)
     monkeypatch.setattr(manager, "_get_user_env_vars", no_user_env_vars)
     monkeypatch.setattr(manager, "_ensure_work_dir", no_async_side_effect)
@@ -226,6 +227,7 @@ async def test_cancelled_lazy_cubesandbox_create_completes_manager_binding_and_c
         return None
 
     monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "cubesandbox")
+    manager._platform = "cubesandbox"
     monkeypatch.setattr(sandbox_module, "run_blocking_io", gated_run_blocking_io)
     monkeypatch.setattr(manager, "_get_user_env_vars", no_user_env_vars)
     monkeypatch.setattr(manager, "_ensure_work_dir", no_async_side_effect)
@@ -313,17 +315,16 @@ async def test_binding_is_scoped_by_sandbox_platform(
         lambda: _FakeMongoClient(collection),
     )
 
-    manager = sandbox_module.SessionSandboxManager()
     monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "e2b")
-    await manager._save_binding("user-1", "e2b-sandbox", "running", is_new=True)
+    e2b_manager = sandbox_module.SessionSandboxManager()
+    await e2b_manager._save_binding("user-1", "e2b-sandbox", "running", is_new=True)
 
     monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "cubesandbox")
-    await manager._save_binding("user-1", "cube-sandbox", "running", is_new=True)
+    cube_manager = sandbox_module.SessionSandboxManager()
+    await cube_manager._save_binding("user-1", "cube-sandbox", "running", is_new=True)
 
-    monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "e2b")
-    e2b_binding = await manager._get_binding("user-1")
-    monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "cubesandbox")
-    cube_binding = await manager._get_binding("user-1")
+    e2b_binding = await e2b_manager._get_binding("user-1")
+    cube_binding = await cube_manager._get_binding("user-1")
 
     assert e2b_binding["sandbox_id"] == "e2b-sandbox"
     assert cube_binding["sandbox_id"] == "cube-sandbox"
@@ -379,6 +380,7 @@ async def test_e2b_reconnects_legacy_binding_without_creating_new_sandbox(
         lambda: _FakeMongoClient(collection),
     )
     monkeypatch.setattr(sandbox_module, "run_blocking_io", fake_run_blocking_io)
+    manager._platform = "e2b"
     monkeypatch.setattr(manager, "_ensure_work_dir", fake_ensure_work_dir)
     monkeypatch.setattr(sandbox_module.settings, "SANDBOX_PLATFORM", "e2b")
     monkeypatch.setattr(sandbox_module.settings, "E2B_TIMEOUT", 123)
@@ -726,3 +728,28 @@ async def test_bindings_reuses_inflight_index_task_across_instances(
         await task
 
     assert collection.create_index_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_docker_janitor_start_is_idempotent() -> None:
+    manager = sandbox_module.SessionSandboxManager()
+    manager._platform = "docker"
+    manager._docker_adapter = object()
+    entered = asyncio.Event()
+
+    async def fake_cleanup_loop() -> None:
+        entered.set()
+        await asyncio.Future()
+
+    manager._docker_cleanup_loop = fake_cleanup_loop  # type: ignore[method-assign]
+    manager.start_background_tasks()
+    first = manager._docker_cleanup_task
+    manager.start_background_tasks()
+    second = manager._docker_cleanup_task
+
+    assert first is not None
+    assert second is first
+    await entered.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first

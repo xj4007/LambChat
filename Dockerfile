@@ -22,7 +22,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install uv (Node.js not needed at runtime — e2b uses remote sandboxes)
+# Install only the Python Docker SDK; local sandbox access is optional and does not require the Docker CLI.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/* \

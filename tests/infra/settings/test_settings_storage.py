@@ -378,3 +378,50 @@ async def test_settings_service_get_offloads_env_json_parsing(
     value = await settings_service.get("WELCOME_SUGGESTIONS")
 
     assert value == {"en": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("DOCKER_SANDBOX_NAMESPACE", "bad namespace"),
+        ("DOCKER_SANDBOX_IMAGE", " image:latest"),
+        ("DOCKER_SANDBOX_TIMEOUT", 0),
+        ("DOCKER_SANDBOX_IDLE_TIMEOUT", 59),
+        ("DOCKER_SANDBOX_CLEANUP_INTERVAL", 9),
+        ("DOCKER_SANDBOX_MAX_CONTAINERS", 101),
+        ("DOCKER_SANDBOX_MEMORY_LIMIT_MB", 127),
+        ("DOCKER_SANDBOX_CPU_LIMIT", 0.09),
+        ("DOCKER_SANDBOX_PIDS_LIMIT", 15),
+        ("DOCKER_SANDBOX_NETWORK_MODE", "host"),
+        ("DOCKER_SANDBOX_MAX_OUTPUT_BYTES", 1024),
+    ],
+)
+async def test_set_rejects_invalid_docker_settings_before_persisting(
+    key: str,
+    value: object,
+) -> None:
+    from src.infra.settings.storage import SettingsStorage
+
+    class _MustNotWriteCollection:
+        async def update_one(self, *_args, **_kwargs):
+            raise AssertionError("invalid Docker setting must not be persisted")
+
+    storage = SettingsStorage()
+    storage._collection = _MustNotWriteCollection()
+
+    with pytest.raises(ValueError, match=key):
+        await storage.set(key, value, "admin-1")
+
+
+@pytest.mark.asyncio
+async def test_set_accepts_valid_docker_setting_without_coercing_it() -> None:
+    from src.infra.settings.storage import SettingsStorage
+
+    collection = _SettingsWriteCollection({})
+    storage = SettingsStorage()
+    storage._collection = collection
+
+    await storage.set("DOCKER_SANDBOX_CPU_LIMIT", 1.5, "admin-1")
+
+    assert collection.docs["DOCKER_SANDBOX_CPU_LIMIT"]["value"] == 1.5

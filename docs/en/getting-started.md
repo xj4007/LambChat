@@ -83,6 +83,6 @@ LambChat
 | Database | MongoDB (primary), Redis (cache/pubsub) |
 | Optional DB | PostgreSQL (checkpoint store) |
 | Object Storage | S3-compatible (AWS, Aliyun, MinIO) |
-| Sandbox | Daytona or E2B |
+| Sandbox | Daytona, E2B, CubeSandbox, or local Docker Engine |
 | Auth | JWT, OAuth, bcrypt |
 | Tracing | LangSmith |

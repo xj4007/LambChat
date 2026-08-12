@@ -408,7 +408,7 @@ async def _create_search_backend(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["e2b", "cubesandbox", "daytona"])
+@pytest.mark.parametrize("platform", ["e2b", "cubesandbox", "docker", "daytona"])
 async def test_search_backend_construction_is_provider_neutral_and_lazy(
     monkeypatch: pytest.MonkeyPatch,
     platform: str,

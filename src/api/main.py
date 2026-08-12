@@ -516,6 +516,13 @@ async def lifespan(app: FastAPI):
     # 从数据库初始化设置
     await initialize_settings()
     logger.info("Settings initialized from database")
+    if settings.ENABLE_SANDBOX and settings.SANDBOX_PLATFORM.lower() == "docker":
+        try:
+            from src.infra.sandbox.session_manager import get_session_sandbox_manager
+
+            get_session_sandbox_manager().start_background_tasks()
+        except Exception as exc:
+            logger.warning("Docker sandbox janitor did not start: %s", exc, exc_info=True)
 
     validate_distributed_runtime_settings(settings)
 

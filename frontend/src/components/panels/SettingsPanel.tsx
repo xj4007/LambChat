@@ -173,6 +173,7 @@ export function SettingsPanel() {
       title: t("subcategories.title"),
       events: t("subcategories.events"),
       daytona: t("subcategories.daytona"),
+      docker: t("subcategories.docker"),
       e2b: t("subcategories.e2b"),
       mcp: t("subcategories.mcp"),
       deferred: t("subcategories.deferred"),
@@ -347,8 +348,10 @@ export function SettingsPanel() {
           delete next[setting.key];
           return next;
         });
-        // Show success toast
         toast.success(t("settings.saved"));
+        if (setting.requires_restart) {
+          toast(t("settings.restartRequired"));
+        }
         // Remove saved indicator after 2 seconds
         setTimeout(() => {
           setSavedKeys((prev) => {

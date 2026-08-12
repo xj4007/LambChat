@@ -1,14 +1,26 @@
 # Sandbox Configuration
 
-Code sandbox settings for secure remote code execution. Supports Daytona, E2B, and CubeSandbox platforms.
+Code sandbox settings for secure code execution. Supports Daytona, E2B, CubeSandbox, and local Docker Engine deployments.
 
 ## General
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENABLE_SANDBOX` | `false` | Enable sandbox execution. |
-| `SANDBOX_PLATFORM` | `daytona` | Sandbox platform: `daytona`, `e2b`, or `cubesandbox`. |
+| `SANDBOX_PLATFORM` | `daytona` | Sandbox platform: `daytona`, `e2b`, `cubesandbox`, or `docker`. Changing it requires a server restart. |
 | `SANDBOX_GREP_TIMEOUT` | `30` | Sandbox grep command timeout in seconds. |
+
+## Platform and workspace semantics
+
+| Platform | Runtime | Binding and workspace behavior |
+|----------|---------|--------------------------------|
+| `daytona` | Daytona API | One user binding reused across conversations and sessions. |
+| `e2b` | E2B API | One user binding reused across conversations and sessions. |
+| `cubesandbox` | CubeSandbox API | One user binding reused across conversations and sessions. |
+| `docker` | Local Docker Engine | One non-root container per user; each session uses its own workspace directory inside that container. |
+
+All platforms preserve the per-user binding while session work directories isolate files between sessions. For Docker, the public `/workspace/...` path is mapped to a session-specific directory below `/tmp/lambchat-workspace`. Docker containers are stopped during normal application shutdown and removed after the idle timeout; removal permanently discards the container writable layer and all temporary files. There is no named volume or host bind mount.
+
 
 ## Daytona
 
@@ -47,6 +59,29 @@ CubeSandbox is supported through the native CubeSandbox Python SDK. LambChat use
 | `CUBE_REQUEST_TIMEOUT` | `120` | No | SDK request timeout in seconds. Lower values fail faster on stale data-plane connections; higher values tolerate slower local starts. |
 | `CUBE_AUTO_PAUSE` | `true` | No | Ask CubeSandbox to pause on timeout instead of killing when supported by the runtime. |
 | `CUBE_AUTO_RESUME` | `true` | No | Ask CubeSandbox to auto-resume paused sandboxes when supported by the runtime. |
+
+
+## Local Docker Engine
+
+Docker is an opt-in local backend. The LambChat process must be able to reach a Linux Docker Engine with memory/swap/CPU/PID cgroup limits and the default seccomp profile. LambChat probes these capabilities before creating a container and fails closed when required isolation is unavailable. Ordinary deployments do not need Docker daemon access.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOCKER_SANDBOX_NAMESPACE` | `default` | Lowercase daemon namespace isolating one LambChat deployment from another. Must be unique per deployment. |
+| `DOCKER_SANDBOX_IMAGE` | `python:3.12-slim-bookworm` | Image pulled on first use when missing. Production should use an immutable digest. |
+| `DOCKER_SANDBOX_TIMEOUT` | `180` | Maximum command duration in seconds. |
+| `DOCKER_SANDBOX_IDLE_TIMEOUT` | `1800` | Idle seconds before the container and its temporary files are removed. |
+| `DOCKER_SANDBOX_CLEANUP_INTERVAL` | `60` | Janitor scan interval in seconds. |
+| `DOCKER_SANDBOX_MAX_CONTAINERS` | `20` | Maximum managed containers in this namespace. |
+| `DOCKER_SANDBOX_MEMORY_LIMIT_MB` | `1024` | Hard memory and swap limit per container in MB. |
+| `DOCKER_SANDBOX_CPU_LIMIT` | `1.0` | CPU limit converted to Docker `nano_cpus`. |
+| `DOCKER_SANDBOX_PIDS_LIMIT` | `256` | Maximum number of processes in a container. |
+| `DOCKER_SANDBOX_NETWORK_MODE` | `bridge` | `bridge` creates one private user-defined bridge per container; `none` disables networking. |
+| `DOCKER_SANDBOX_MAX_OUTPUT_BYTES` | `10485760` | Direct command output capture limit in bytes. |
+
+The managed container runs as UID/GID `65534:65534` with all Linux capabilities dropped, `no-new-privileges`, no ports, devices, mounts, volumes, host PID/IPC, or Docker socket. A `bridge` container has only its own non-internal user-defined bridge and never joins the default bridge, Compose network, or host network. An idle removal discards temporary files; stop/start keeps the writable layer and its bridge.
+
+The Docker backend is intended for a trusted single deployment. Access to `/var/run/docker.sock` is effectively host-root access. Use the dedicated Compose override only when that risk is acceptable; never replace it with an unauthenticated TCP daemon.
 
 ### Lifecycle Behavior
 
@@ -142,6 +177,18 @@ CUBE_REQUEST_TIMEOUT=120
 CUBE_AUTO_PAUSE=true
 CUBE_AUTO_RESUME=true
 ```
+
+### Docker (Local Engine)
+
+```bash
+ENABLE_SANDBOX=true
+SANDBOX_PLATFORM=docker
+DOCKER_SANDBOX_NAMESPACE=my-lambchat
+DOCKER_SANDBOX_IMAGE=python:3.12-slim-bookworm
+DOCKER_SANDBOX_NETWORK_MODE=bridge
+```
+
+Use the Docker deployment instructions before enabling this platform. A Docker namespace is deployment-wide and must be unique on the daemon; changing platform or namespace is a clean cutover after restart. For an intentionally network-isolated sandbox, set `DOCKER_SANDBOX_NETWORK_MODE=none`.
 
 ::: info
 The `DAYTONA_AUTO_*_INTERVAL` settings control sandbox lifecycle management to optimize resource usage. Sandboxes are automatically stopped, archived, and eventually deleted based on these intervals.

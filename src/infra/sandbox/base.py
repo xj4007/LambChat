@@ -1,24 +1,39 @@
 """
 Sandbox 工厂和配置
 
-统一管理 Daytona、E2B 两个 Sandbox 平台。
-直接使用 langchain-{platform} 库提供的实现。
+统一管理 Daytona、E2B、CubeSandbox 和本地 Docker Engine Sandbox。
+直接使用各平台 SDK 提供的实现。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
+from src.kernel.config.docker_sandbox import (
+    DOCKER_SANDBOX_DEFAULTS,
+    DOCKER_SANDBOX_KEYS,
+    validate_docker_sandbox_values,
+)
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import SandboxBackendProtocol
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _SandboxRegistration:
+    """Internal registry entry with an explicit provider close operation."""
+
+    backend: "SandboxBackendProtocol"
+    provider: Any
+    close: Callable[[], Any]
 
 
 # =============================================================================
@@ -71,6 +86,24 @@ class CubeSandboxConfig(SandboxConfig):
     auto_resume: bool = True
 
 
+@dataclass
+class DockerSandboxConfig(SandboxConfig):
+    """Configuration for the local Docker Engine sandbox backend."""
+
+    platform: str = field(default="docker", init=False)
+    namespace: str = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_NAMESPACE"]
+    image: str = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_IMAGE"]
+    timeout: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_TIMEOUT"]
+    idle_timeout: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_IDLE_TIMEOUT"]
+    cleanup_interval: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_CLEANUP_INTERVAL"]
+    max_containers: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MAX_CONTAINERS"]
+    memory_limit_mb: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MEMORY_LIMIT_MB"]
+    cpu_limit: float = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_CPU_LIMIT"]
+    pids_limit: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_PIDS_LIMIT"]
+    network_mode: str = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_NETWORK_MODE"]
+    max_output_bytes: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MAX_OUTPUT_BYTES"]
+
+
 # =============================================================================
 # 工厂类
 # =============================================================================
@@ -85,7 +118,7 @@ class SandboxFactory:
     """
 
     # 追踪创建的 sandbox 和其底层 provider 对象（用于关闭）
-    _sandbox_registry: dict[str, tuple["SandboxBackendProtocol", Any]] = {}
+    _sandbox_registry: dict[str, _SandboxRegistration] = {}
     # 追踪 run_id 到 sandbox_id 的映射（用于取消时关闭特定沙箱）
     _run_id_to_sandbox: dict[str, str] = {}
 
@@ -128,7 +161,11 @@ class SandboxFactory:
 
             # 注册以便追踪和关闭
             sandbox_id = sandbox.id
-            cls._sandbox_registry[sandbox_id] = (backend, sandbox)
+            cls._sandbox_registry[sandbox_id] = _SandboxRegistration(
+                backend=backend,
+                provider=sandbox,
+                close=sandbox.delete,
+            )
             logger.info(f"Created Daytona sandbox: {sandbox_id}, TTL={ttl_seconds}s")
 
             return backend
@@ -178,7 +215,11 @@ class SandboxFactory:
 
             # 注册以便追踪和关闭
             sandbox_id = sandbox.sandbox_id
-            cls._sandbox_registry[sandbox_id] = (backend, sandbox)
+            cls._sandbox_registry[sandbox_id] = _SandboxRegistration(
+                backend=backend,
+                provider=sandbox,
+                close=sandbox.kill,
+            )
             logger.info(
                 f"Created E2B sandbox: {sandbox_id}, template={template}, timeout={timeout}s"
             )
@@ -186,6 +227,12 @@ class SandboxFactory:
             return backend
         except ImportError as e:
             raise ImportError("Please install e2b: pip install e2b") from e
+
+    @staticmethod
+    def _provider_missing(exc: BaseException) -> bool:
+        name = type(exc).__name__.lower()
+        message = str(exc).lower()
+        return name in {"notfound", "notfounderror"} or "not found" in message
 
     @classmethod
     async def close_sandbox(
@@ -209,34 +256,29 @@ class SandboxFactory:
             logger.warning(f"Sandbox {sandbox_id} not found in registry")
             return False
 
-        # 不要在这里 pop，等成功关闭后再移除
-        backend, provider_obj = cls._sandbox_registry[sandbox_id]
-
+        # Do not pop until the explicit provider close operation succeeds.
+        registration = cls._sandbox_registry[sandbox_id]
         last_error = None
         for attempt in range(max_retries):
             try:
 
                 def _sync_close_provider() -> None:
-                    # 根据模块名判断类型并关闭
-                    module_name = type(provider_obj).__module__
-
-                    if "daytona" in module_name:
-                        # Daytona: sandbox.delete()
-                        provider_obj.delete()
-                    elif "e2b" in module_name:
-                        # E2B: sandbox.kill()
-                        provider_obj.kill()
-                    else:
-                        logger.warning(f"Unknown provider type: {module_name}")
+                    result = registration.close()
+                    if result is False:
+                        raise RuntimeError(f"Sandbox {sandbox_id} close operation failed")
 
                 await run_blocking_io(_sync_close_provider)
 
-                # 成功关闭后才从 registry 移除
+                # Successful close removes the registry entry.
                 cls._sandbox_registry.pop(sandbox_id, None)
                 logger.info(f"Closed sandbox: {sandbox_id}")
                 return True
 
             except Exception as e:
+                if cls._provider_missing(e):
+                    cls._sandbox_registry.pop(sandbox_id, None)
+                    logger.info("Sandbox %s was already absent", sandbox_id)
+                    return True
                 last_error = e
                 error_msg = str(e).lower()
 
@@ -296,8 +338,8 @@ class SandboxFactory:
         Returns:
             Sandbox ID 或 None
         """
-        for sandbox_id, (registered_backend, _) in cls._sandbox_registry.items():
-            if registered_backend is backend:
+        for sandbox_id, registration in cls._sandbox_registry.items():
+            if registration.backend is backend:
                 return sandbox_id
         return None
 
@@ -327,6 +369,43 @@ class SandboxFactory:
         if sandbox_id:
             return await cls.close_sandbox(sandbox_id)
         return False
+
+    @classmethod
+    def create_docker(
+        cls,
+        config: DockerSandboxConfig,
+        *,
+        owner_id: str = "factory",
+        env_vars: dict[str, str] | None = None,
+    ) -> "SandboxBackendProtocol":
+        """Create and register one Docker sandbox for direct factory callers."""
+        from src.infra.backend.docker import DockerSandboxBackend
+        from src.infra.sandbox._docker_adapter import DockerSandboxAdapter
+
+        adapter = DockerSandboxAdapter(config)
+        container = None
+        try:
+            container = adapter.create_sandbox(owner_id)
+            sandbox_id = adapter.get_sandbox_id(container)
+            backend = DockerSandboxBackend(
+                container,
+                adapter,
+                timeout=config.timeout,
+                max_output_bytes=config.max_output_bytes,
+                env_vars=env_vars,
+            )
+            cls._sandbox_registry[sandbox_id] = _SandboxRegistration(
+                backend=backend,
+                provider=container,
+                close=lambda: adapter.remove_sandbox(sandbox_id, force=True),
+            )
+            return backend
+        except Exception:
+            if container is not None:
+                with contextlib.suppress(Exception):
+                    adapter.remove_sandbox(adapter.get_sandbox_id(container), force=True)
+            adapter.close()
+            raise
 
     @classmethod
     def create(cls, config: SandboxConfig) -> "SandboxBackendProtocol":
@@ -385,7 +464,11 @@ class SandboxFactory:
                 ),
             )
             backend = CubeSandboxBackend(sandbox=sandbox, timeout=config.timeout)
-            cls._sandbox_registry[sandbox.sandbox_id] = (backend, sandbox)
+            cls._sandbox_registry[sandbox.sandbox_id] = _SandboxRegistration(
+                backend=backend,
+                provider=sandbox,
+                close=sandbox.kill,
+            )
             logger.info(
                 "Created CubeSandbox sandbox: %s, template=%s, timeout=%ss",
                 sandbox.sandbox_id,
@@ -393,13 +476,42 @@ class SandboxFactory:
                 config.timeout,
             )
             return backend
+        elif config.platform == "docker":
+            if not isinstance(config, DockerSandboxConfig):
+                raise ValueError("Invalid config type for docker platform")
+            return cls.create_docker(config)
         else:
-            raise ValueError(f"Unknown sandbox platform: {config.platform}")
+            raise ValueError(f"Unsupported sandbox platform: {config.platform}")
 
 
 # =============================================================================
 # 辅助函数
 # =============================================================================
+
+
+def get_docker_sandbox_config_from_settings(
+    namespace_override: str | None = None,
+) -> DockerSandboxConfig:
+    """Build and defensively validate Docker configuration from runtime settings."""
+
+    values = {key: getattr(settings, key) for key in DOCKER_SANDBOX_KEYS}
+    if namespace_override is not None:
+        values["DOCKER_SANDBOX_NAMESPACE"] = namespace_override
+    validate_docker_sandbox_values(values)
+    return DockerSandboxConfig(
+        ttl_seconds=values["DOCKER_SANDBOX_IDLE_TIMEOUT"],
+        namespace=values["DOCKER_SANDBOX_NAMESPACE"],
+        image=values["DOCKER_SANDBOX_IMAGE"],
+        timeout=values["DOCKER_SANDBOX_TIMEOUT"],
+        idle_timeout=values["DOCKER_SANDBOX_IDLE_TIMEOUT"],
+        cleanup_interval=values["DOCKER_SANDBOX_CLEANUP_INTERVAL"],
+        max_containers=values["DOCKER_SANDBOX_MAX_CONTAINERS"],
+        memory_limit_mb=values["DOCKER_SANDBOX_MEMORY_LIMIT_MB"],
+        cpu_limit=values["DOCKER_SANDBOX_CPU_LIMIT"],
+        pids_limit=values["DOCKER_SANDBOX_PIDS_LIMIT"],
+        network_mode=values["DOCKER_SANDBOX_NETWORK_MODE"],
+        max_output_bytes=values["DOCKER_SANDBOX_MAX_OUTPUT_BYTES"],
+    )
 
 
 def get_sandbox_config_from_settings() -> SandboxConfig:
@@ -432,6 +544,8 @@ def get_sandbox_config_from_settings() -> SandboxConfig:
             auto_pause=getattr(settings, "CUBE_AUTO_PAUSE", True),
             auto_resume=getattr(settings, "CUBE_AUTO_RESUME", True),
         )
+    elif platform == "docker":
+        return get_docker_sandbox_config_from_settings()
     else:
         raise ValueError(f"Unsupported sandbox platform: {platform}")
 

@@ -22,7 +22,7 @@ hero:
 - **Agent 运行时** — 多 Agent 类型、子 Agent、流式输出、人工审批
 - **多模型支持** — OpenAI、Anthropic、Gemini、Kimi 等
 - **MCP 工具连接** — 加密存储、延迟加载
-- **代码沙箱** — Daytona 或 E2B 远程代码执行
+- **代码沙箱** — Daytona、E2B、CubeSandbox 或本地 Docker Engine 代码执行
 - **跨会话记忆** — 原生嵌入驱动的记忆系统，支持搜索索引
 - **技能市场** — 内置与自定义技能，GitHub 同步
 - **完整认证系统** — JWT、OAuth（Google/GitHub/Apple）、RBAC、验证码

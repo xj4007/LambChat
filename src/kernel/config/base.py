@@ -7,12 +7,17 @@ import secrets
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional
 
-from pydantic import Field, PrivateAttr, field_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from src.infra.logging import get_logger
 
 from .constants import JWT_SECRET_KEY_MIN_LENGTH, MCP_ENCRYPTION_SALT_MIN_LENGTH
+from .docker_sandbox import (
+    DOCKER_SANDBOX_DEFAULTS,
+    DOCKER_SANDBOX_KEYS,
+    validate_docker_sandbox_values,
+)
 from .utils import (
     COMMIT_HASH,
     GIT_TAG,
@@ -211,6 +216,21 @@ class Settings(BaseSettings):
     DAYTONA_AUTO_STOP_INTERVAL: int = 5
     DAYTONA_AUTO_ARCHIVE_INTERVAL: int = 5
     DAYTONA_AUTO_DELETE_INTERVAL: int = 1440
+    DOCKER_SANDBOX_NAMESPACE: str = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_NAMESPACE"]
+    DOCKER_SANDBOX_IMAGE: str = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_IMAGE"]
+    DOCKER_SANDBOX_TIMEOUT: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_TIMEOUT"]
+    DOCKER_SANDBOX_IDLE_TIMEOUT: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_IDLE_TIMEOUT"]
+    DOCKER_SANDBOX_CLEANUP_INTERVAL: int = DOCKER_SANDBOX_DEFAULTS[
+        "DOCKER_SANDBOX_CLEANUP_INTERVAL"
+    ]
+    DOCKER_SANDBOX_MAX_CONTAINERS: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MAX_CONTAINERS"]
+    DOCKER_SANDBOX_MEMORY_LIMIT_MB: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MEMORY_LIMIT_MB"]
+    DOCKER_SANDBOX_CPU_LIMIT: float = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_CPU_LIMIT"]
+    DOCKER_SANDBOX_PIDS_LIMIT: int = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_PIDS_LIMIT"]
+    DOCKER_SANDBOX_NETWORK_MODE: str = DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_NETWORK_MODE"]
+    DOCKER_SANDBOX_MAX_OUTPUT_BYTES: int = DOCKER_SANDBOX_DEFAULTS[
+        "DOCKER_SANDBOX_MAX_OUTPUT_BYTES"
+    ]
 
     # E2B Settings
     E2B_API_KEY: str = ""
@@ -416,6 +436,18 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    @field_validator(*DOCKER_SANDBOX_KEYS, mode="before")
+    @classmethod
+    def _reject_docker_boolean_values(cls, value: Any, info: Any) -> Any:
+        if isinstance(value, bool):
+            validate_docker_sandbox_values({info.field_name: value})
+        return value
+
+    @model_validator(mode="after")
+    def _validate_docker_sandbox_settings(self) -> "Settings":
+        validate_docker_sandbox_values({key: getattr(self, key) for key in DOCKER_SANDBOX_KEYS})
+        return self
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)

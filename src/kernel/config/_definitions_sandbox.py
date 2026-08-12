@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.kernel.config.docker_sandbox import DOCKER_SANDBOX_DEFAULTS, DOCKER_SANDBOX_OPTIONS
 from src.kernel.schemas.setting import SettingCategory, SettingType
 
 SANDBOX_SETTING_DEFINITIONS: dict[str, dict] = {
@@ -23,7 +24,96 @@ SANDBOX_SETTING_DEFINITIONS: dict[str, dict] = {
         "description": "settingDesc.SANDBOX_PLATFORM",
         "default": "daytona",
         "depends_on": "ENABLE_SANDBOX",
-        "options": ["daytona", "e2b", "cubesandbox"],
+        "options": ["daytona", "e2b", "cubesandbox", "docker"],
+    },
+    "DOCKER_SANDBOX_NAMESPACE": {
+        "type": SettingType.STRING,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_NAMESPACE",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_NAMESPACE"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_IMAGE": {
+        "type": SettingType.STRING,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_IMAGE",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_IMAGE"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_TIMEOUT": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_TIMEOUT",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_TIMEOUT"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_IDLE_TIMEOUT": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_IDLE_TIMEOUT",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_IDLE_TIMEOUT"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_CLEANUP_INTERVAL": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_CLEANUP_INTERVAL",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_CLEANUP_INTERVAL"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_MAX_CONTAINERS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_MAX_CONTAINERS",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MAX_CONTAINERS"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_MEMORY_LIMIT_MB": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_MEMORY_LIMIT_MB",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MEMORY_LIMIT_MB"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_CPU_LIMIT": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_CPU_LIMIT",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_CPU_LIMIT"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_PIDS_LIMIT": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_PIDS_LIMIT",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_PIDS_LIMIT"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+    },
+    "DOCKER_SANDBOX_NETWORK_MODE": {
+        "type": SettingType.SELECT,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_NETWORK_MODE",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_NETWORK_MODE"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
+        "options": DOCKER_SANDBOX_OPTIONS["DOCKER_SANDBOX_NETWORK_MODE"],
+    },
+    "DOCKER_SANDBOX_MAX_OUTPUT_BYTES": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "docker",
+        "description": "settingDesc.DOCKER_SANDBOX_MAX_OUTPUT_BYTES",
+        "default": DOCKER_SANDBOX_DEFAULTS["DOCKER_SANDBOX_MAX_OUTPUT_BYTES"],
+        "depends_on": {"key": "SANDBOX_PLATFORM", "value": "docker"},
     },
     "DAYTONA_API_KEY": {
         "type": SettingType.STRING,

@@ -14,6 +14,10 @@ from src.kernel.config import (
     _get_default_from_settings,
     settings,
 )
+from src.kernel.config.docker_sandbox import (
+    DOCKER_SANDBOX_KEYS,
+    validate_docker_sandbox_value,
+)
 from src.kernel.schemas.setting import SettingItem
 
 _MONGODB_POOL_SIZE_SETTINGS = {
@@ -316,6 +320,8 @@ class SettingsStorage:
         if value == "********":
             raise ValueError("Cannot set masked value")
 
+        if key in DOCKER_SANDBOX_KEYS:
+            validate_docker_sandbox_value(key, value)
         _validate_mongodb_pool_size_bounds(key, value)
 
         # Type validation

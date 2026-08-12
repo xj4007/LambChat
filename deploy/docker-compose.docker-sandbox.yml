@@ -1,0 +1,9 @@
+services:
+  lambchat:
+    user: app
+    environment:
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the host Docker socket group}"

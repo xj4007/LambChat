@@ -62,6 +62,6 @@ pnpm dev       # 启动前端开发服务器（端口 3001）
 | 数据库 | MongoDB（主数据库）, Redis（缓存/发布订阅） |
 | 可选数据库 | PostgreSQL（检查点存储） |
 | 对象存储 | S3 兼容（AWS、阿里云、MinIO） |
-| 沙箱 | Daytona 或 E2B |
+| 沙箱 | Daytona、E2B、CubeSandbox 或本地 Docker Engine |
 | 认证 | JWT, OAuth, bcrypt |
 | 链路追踪 | LangSmith |

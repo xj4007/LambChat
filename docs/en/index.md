@@ -22,7 +22,7 @@ hero:
 - **Agent Runtime** — Multi-agent types, sub-agents, streaming, human-in-the-loop approvals
 - **Multi-Provider Models** — OpenAI, Anthropic, Gemini, Kimi and more
 - **MCP Tool Connectivity** — Encrypted storage, deferred loading
-- **Code Sandbox** — Daytona or E2B remote code execution
+- **Code Sandbox** — Daytona, E2B, CubeSandbox, or local Docker Engine code execution
 - **Cross-Session Memory** — Native, embedding-powered memory with search index
 - **Skills Marketplace** — Built-in and custom skills with GitHub sync
 - **Full Auth System** — JWT, OAuth (Google/GitHub/Apple), RBAC, CAPTCHA

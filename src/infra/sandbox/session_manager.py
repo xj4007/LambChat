@@ -1,21 +1,23 @@
 """
 User-Sandbox 绑定管理器
 
-管理 User 与 Sandbox 的绑定关系，支持 Daytona、E2B 和 CubeSandbox 平台。
+管理 User 与 Sandbox 的绑定关系，支持 Daytona、E2B、CubeSandbox 和 Docker 平台。
 - 沙箱绑定关系存储在 MongoDB user_sandbox_bindings 集合中
 - 每个用户对应一个沙箱，跨 session 共享
-- 沙箱在空闲时自动 stop/archive (Daytona) 或超时销毁 (E2B)
+- Daytona/E2B/CubeSandbox 使用各自生命周期；Docker 空闲容器由 janitor 删除
 - 使用 deepagents.CompositeBackend 组合 Sandbox 和 Skills Store
 
 平台特定的生命周期逻辑分别放在 _daytona_helpers、_e2b_helpers、
-_cubesandbox_helpers 模块中，通过 mixin 组合到本类。
+_cubesandbox_helpers 和 _docker_helpers 模块中，通过 mixin 组合到本类。
 """
 
 import asyncio
+import contextlib
 import re
 import shlex
 import threading
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
@@ -49,7 +51,10 @@ from ._adapters import (
 )
 from ._cubesandbox_helpers import _CubeSandboxMixin
 from ._daytona_helpers import _DaytonaMixin
+from ._docker_adapter import CREATED_AT_LABEL, DockerSandboxAdapter
+from ._docker_helpers import _DockerMixin
 from ._e2b_helpers import _E2BMixin
+from .base import get_docker_sandbox_config_from_settings
 
 logger = get_logger(__name__)
 
@@ -61,24 +66,32 @@ __all__ = [
 ]
 
 
-class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
+class SessionSandboxManager(_DockerMixin, _DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
     """管理 User 与 Sandbox 的绑定关系（每个用户一个沙箱，跨 session 共享）"""
 
     _index_task: asyncio.Task[None] | None = None
     _index_ensured = False
 
     def __init__(self):
+        self._platform = settings.SANDBOX_PLATFORM.lower()
+        if self._platform not in {"daytona", "e2b", "cubesandbox", "docker"}:
+            raise ValueError(f"Unsupported sandbox platform: {self._platform}")
         self._daytona_client: Optional["Daytona"] = None
         self._e2b_adapter: Optional[E2BSandboxAdapter] = None
         self._cube_adapter: Optional[CubeSandboxAdapter] = None
+        self._docker_adapter: Optional[DockerSandboxAdapter] = None
+        self._docker_namespace = getattr(settings, "DOCKER_SANDBOX_NAMESPACE", "default")
+        self._docker_cleanup_task: asyncio.Task[None] | None = None
         self._collection: Any = None
         self._cache: OrderedDict[str, tuple[str, CompositeBackend, object | None]] = OrderedDict()
         self._ready_work_dirs: OrderedDict[str, None] = OrderedDict()
         self._locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_mutex = threading.Lock()
-
-        platform = settings.SANDBOX_PLATFORM.lower()
-        if platform == "e2b":
+        if self._platform == "docker":
+            docker_config = get_docker_sandbox_config_from_settings()
+            self._docker_namespace = docker_config.namespace
+            self._docker_adapter = DockerSandboxAdapter(docker_config)
+        elif self._platform == "e2b":
             self._e2b_adapter = E2BSandboxAdapter(
                 api_key=settings.E2B_API_KEY,
                 template=settings.E2B_TEMPLATE,
@@ -86,7 +99,7 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
                 auto_pause=getattr(settings, "E2B_AUTO_PAUSE", True),
                 auto_resume=getattr(settings, "E2B_AUTO_RESUME", True),
             )
-        elif platform == "cubesandbox":
+        elif self._platform == "cubesandbox":
             self._cube_adapter = CubeSandboxAdapter(
                 api_url=settings.CUBE_API_URL,
                 template=settings.CUBE_TEMPLATE,
@@ -164,8 +177,8 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
             return self._locks[user_id]
 
     def _binding_platform(self) -> str:
-        """Return the active sandbox platform used to scope persisted bindings."""
-        return settings.SANDBOX_PLATFORM.lower()
+        """Return the platform fixed when this manager process was constructed."""
+        return self._platform
 
     async def _get_binding(self, user_id: str) -> Optional[dict]:
         """从 MongoDB 获取当前平台的用户沙箱绑定"""
@@ -316,6 +329,204 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
             upsert=True,
         )
 
+    def start_background_tasks(self) -> None:
+        """Start the Docker janitor once; no-op for remote sandbox platforms."""
+
+        if self._platform != "docker" or self._docker_adapter is None:
+            return
+        task = self._docker_cleanup_task
+        if task is not None and not task.done():
+            return
+        try:
+            task = asyncio.create_task(self._docker_cleanup_loop())
+        except RuntimeError:
+            return
+        self._docker_cleanup_task = task
+
+        def _consume(done_task: asyncio.Task[None]) -> None:
+            if not done_task.cancelled():
+                with contextlib.suppress(Exception):
+                    done_task.exception()
+
+        task.add_done_callback(_consume)
+
+    async def _docker_cleanup_loop(self) -> None:
+        while True:
+            try:
+                await self._cleanup_stale_docker_sandboxes()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Docker sandbox cleanup round failed: %s", exc, exc_info=True)
+            try:
+                config = get_docker_sandbox_config_from_settings(self._docker_namespace)
+                interval = config.cleanup_interval
+            except Exception as exc:
+                logger.warning("Docker cleanup interval refresh failed: %s", exc)
+                interval = 60
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+
+    @staticmethod
+    def _docker_parse_activity(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (
+            parsed.replace(tzinfo=timezone.utc)
+            if parsed.tzinfo is None
+            else parsed.astimezone(timezone.utc)
+        )
+
+    async def _docker_binding_documents(self, container_ids: list[str]) -> list[dict[str, Any]]:
+        if not container_ids:
+            return []
+        cursor = self._bindings.find(
+            {"sandboxes.docker.container_id": {"$in": container_ids}},
+            {
+                "user_id": 1,
+                "sandbox_id": 1,
+                "sandbox_platform": 1,
+                "sandboxes.docker": 1,
+            },
+        )
+        return await cursor.to_list(length=len(container_ids) + 1)
+
+    async def _mark_docker_deleted(
+        self,
+        document: dict[str, Any] | None,
+        container_id: str,
+    ) -> None:
+        if document is None:
+            return
+        nested = (document.get("sandboxes") or {}).get("docker") or {}
+        query: dict[str, Any] = {
+            "user_id": document.get("user_id"),
+            "sandboxes.docker.container_id": container_id,
+        }
+        update: dict[str, Any] = {"$set": {"sandboxes.docker.sandbox_state": "deleted"}}
+        if (
+            document.get("sandbox_platform") == "docker"
+            and document.get("sandbox_id") == container_id
+        ):
+            update["$set"].update(
+                {
+                    "sandbox_state": "deleted",
+                    "sandbox_last_used_at": utc_now_iso(),
+                }
+            )
+        if nested.get("container_id") != container_id:
+            return
+        await self._bindings.update_one(query, update)
+
+    async def _mark_docker_stopped(
+        self,
+        document: dict[str, Any] | None,
+        container_id: str,
+    ) -> None:
+        if document is None:
+            return
+        nested = (document.get("sandboxes") or {}).get("docker") or {}
+        if nested.get("container_id") != container_id:
+            return
+        update: dict[str, Any] = {"$set": {"sandboxes.docker.sandbox_state": "stopped"}}
+        if (
+            document.get("sandbox_platform") == "docker"
+            and document.get("sandbox_id") == container_id
+        ):
+            update["$set"].update(
+                {
+                    "sandbox_state": "stopped",
+                    "sandbox_last_used_at": utc_now_iso(),
+                }
+            )
+        await self._bindings.update_one(
+            {
+                "user_id": document.get("user_id"),
+                "sandboxes.docker.container_id": container_id,
+            },
+            update,
+        )
+
+    async def _cleanup_stale_docker_sandboxes(
+        self,
+        now: datetime | None = None,
+    ) -> int:
+        if self._platform != "docker" or self._docker_adapter is None:
+            return 0
+        config = get_docker_sandbox_config_from_settings(self._docker_namespace)
+        self._docker_adapter.refresh_config(config)
+        now_utc = now or datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        else:
+            now_utc = now_utc.astimezone(timezone.utc)
+        cutoff = now_utc - timedelta(seconds=config.idle_timeout)
+        containers = await run_blocking_io(self._docker_adapter.list_sandboxes)
+        ids = [self._docker_adapter.get_sandbox_id(container) for container in containers]
+        documents = await self._docker_binding_documents(ids)
+        by_id: dict[str, dict[str, Any]] = {}
+        for document in documents:
+            nested = (document.get("sandboxes") or {}).get("docker") or {}
+            container_id = nested.get("container_id") or nested.get("sandbox_id")
+            if container_id:
+                by_id[str(container_id)] = document
+
+        removed = 0
+        for container in containers:
+            container_id = self._docker_adapter.get_sandbox_id(container)
+            try:
+                details = self._docker_adapter.info(container)
+            except Exception as exc:
+                logger.warning(
+                    "Docker stale container inspection failed for %s: %s", container_id, exc
+                )
+                continue
+            labels = details.get("labels") or {}
+            observed: list[datetime] = []
+            for value in (
+                labels.get(CREATED_AT_LABEL),
+                details.get("created_at"),
+                (by_id.get(container_id, {}).get("sandboxes") or {})
+                .get("docker", {})
+                .get("sandbox_last_used_at"),
+            ):
+                parsed = self._docker_parse_activity(value)
+                if parsed is not None:
+                    observed.append(parsed)
+            operation_state = self._docker_adapter.get_operation_state(container_id)
+            if operation_state is not None:
+                observed.append(operation_state.last_activity)
+            latest = max(observed) if observed else datetime.min.replace(tzinfo=timezone.utc)
+            if latest >= cutoff:
+                continue
+            claimed = await run_blocking_io(
+                self._docker_adapter.claim_for_removal,
+                container_id,
+                cutoff,
+                latest,
+            )
+            if not claimed:
+                continue
+            try:
+                if await run_blocking_io(self._docker_adapter.remove_sandbox, container_id):
+                    await self._mark_docker_deleted(by_id.get(container_id), container_id)
+                    removed += 1
+            except Exception as exc:
+                logger.warning(
+                    "Docker stale container removal failed for %s: %s", container_id, exc
+                )
+        await run_blocking_io(
+            self._docker_adapter.cleanup_orphan_networks,
+            now_utc - timedelta(seconds=config.cleanup_interval),
+        )
+        return removed
+
     # ── Public API ──────────────────────────────────────────────────
 
     async def get_or_create(
@@ -351,11 +562,14 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
                 "Anonymous users cannot use sandbox features."
             )
 
-        if self._e2b_adapter:
+        if self._platform == "e2b":
             return await self._get_or_create_e2b(session_id, user_id)
-        if self._cube_adapter:
+        if self._platform == "cubesandbox":
             return await self._get_or_create_cubesandbox(session_id, user_id)
-
+        if self._platform == "docker":
+            return await self._get_or_create_docker(session_id, user_id)
+        if self._platform != "daytona":
+            raise ValueError(f"Unsupported sandbox platform: {self._platform}")
         lock = self._get_user_lock(user_id)
 
         async with lock:
@@ -468,10 +682,14 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
                 "Anonymous users cannot use sandbox features."
             )
 
-        if self._e2b_adapter:
+        if self._platform == "e2b":
             return await self._stop_e2b(user_id)
-        if self._cube_adapter:
+        if self._platform == "cubesandbox":
             return await self._stop_cubesandbox(user_id)
+        if self._platform == "docker":
+            return await self._stop_docker(user_id)
+        if self._platform != "daytona":
+            raise ValueError(f"Unsupported sandbox platform: {self._platform}")
 
         lock = self._get_user_lock(user_id)
 
@@ -524,19 +742,95 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
             return None
         return entry[1]
 
-    async def close_all(self) -> None:
-        """停止所有缓存中的沙箱并清理资源（应用关闭时调用）"""
-        # 复制一份，避免迭代过程中修改
-        entries = list(self._cache.items())
-        for user_id, (sandbox_id, _backend, provider_obj) in entries:
+    async def _close_docker_resources(self) -> None:
+        assert self._docker_adapter is not None
+        adapter = self._docker_adapter
+        task = self._docker_cleanup_task
+        self._docker_cleanup_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        keep_namespace = bool(
+            getattr(settings, "ENABLE_SANDBOX", False)
+            and settings.SANDBOX_PLATFORM.lower() == "docker"
+            and getattr(settings, "DOCKER_SANDBOX_NAMESPACE", self._docker_namespace)
+            == self._docker_namespace
+        )
+        try:
             try:
-                await self.stop(user_id)
-            except Exception as e:
-                logger.warning(
-                    f"[SessionSandboxManager] Failed to stop sandbox {sandbox_id} "
-                    f"for user {user_id} during shutdown: {e}"
+                containers = await run_blocking_io(adapter.list_sandboxes)
+            except Exception as exc:
+                logger.warning("Failed to list Docker sandboxes during shutdown: %s", exc)
+                containers = []
+            try:
+                documents = await self._docker_binding_documents(
+                    [adapter.get_sandbox_id(container) for container in containers]
                 )
-        self._cache.clear()
+            except Exception as exc:
+                logger.warning("Failed to load Docker bindings during shutdown: %s", exc)
+                documents = []
+            by_id: dict[str, dict[str, Any]] = {}
+            for document in documents:
+                nested = (document.get("sandboxes") or {}).get("docker") or {}
+                container_id = nested.get("container_id") or nested.get("sandbox_id")
+                if container_id:
+                    by_id[str(container_id)] = document
+
+            for container in containers:
+                container_id = adapter.get_sandbox_id(container)
+                try:
+                    if keep_namespace:
+                        stopped = await run_blocking_io(adapter.recover_sandbox, container, False)
+                        if not stopped:
+                            logger.warning(
+                                "Failed to stop Docker sandbox %s during shutdown", container_id
+                            )
+                            continue
+                        await self._mark_docker_stopped(by_id.get(container_id), container_id)
+                    else:
+                        removed = await run_blocking_io(
+                            adapter.remove_sandbox,
+                            container_id,
+                            force=True,
+                        )
+                        if removed:
+                            await self._mark_docker_deleted(by_id.get(container_id), container_id)
+                        else:
+                            logger.warning(
+                                "Failed to remove Docker sandbox %s during cutover", container_id
+                            )
+                except Exception as exc:
+                    logger.warning("Failed to close Docker sandbox %s: %s", container_id, exc)
+
+            if not keep_namespace:
+                try:
+                    await run_blocking_io(
+                        adapter.cleanup_orphan_networks,
+                        datetime.max.replace(tzinfo=timezone.utc),
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to clean Docker orphan networks during cutover: %s", exc)
+        finally:
+            self._cache.clear()
+            adapter.close()
+
+    async def close_all(self) -> None:
+        """Stop or remove all managed resources according to the cutover policy."""
+        if self._platform == "docker" and self._docker_adapter is not None:
+            await self._close_docker_resources()
+        else:
+            entries = list(self._cache.items())
+            for user_id, (sandbox_id, _backend, _provider_obj) in entries:
+                try:
+                    await self.stop(user_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[SessionSandboxManager] Failed to stop sandbox %s during shutdown: %s",
+                        sandbox_id,
+                        exc,
+                    )
+            self._cache.clear()
         with self._locks_mutex:
             self._locks.clear()
         task = type(self)._index_task
