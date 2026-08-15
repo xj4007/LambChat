@@ -58,6 +58,10 @@ from src.infra.session._trace_storage_support import (
 from src.infra.session._trace_storage_support import (
     _get_event_chunk_size as _get_event_chunk_size,
 )
+from src.infra.session.trace_attachment_cleanup import (
+    ATTACHMENT_CLEAR_TERMINAL_STATUSES as ATTACHMENT_CLEAR_TERMINAL_STATUSES,
+)
+from src.infra.session.trace_attachment_cleanup import TraceAttachmentCleanupMixin
 from src.infra.session.trace_event_chunks import TraceEventChunkMixin
 from src.infra.session.trace_storage_writes import TraceStorageWriteMixin
 from src.infra.storage.mongodb import get_mongo_client
@@ -105,7 +109,11 @@ async def _write_usage_log(trace_id: str) -> None:
         logger.warning(f"Failed to write usage log for trace {trace_id}: {e}")
 
 
-class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
+class TraceStorage(
+    TraceStorageWriteMixin,
+    TraceEventChunkMixin,
+    TraceAttachmentCleanupMixin,
+):
     """
     Trace 存储类
 
@@ -116,6 +124,7 @@ class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
     def __init__(self):
         self._collection = None
         self._chunks_collection = None
+        self._session_storage = None
         self._merger = None  # 事件合并器
         self._indexes_task: asyncio.Task[None] | None = None
 
@@ -137,6 +146,21 @@ class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
             db = client[settings.MONGODB_DB]
             self._chunks_collection = db[settings.MONGODB_TRACE_EVENT_CHUNKS_COLLECTION]
         return self._chunks_collection
+
+    @property
+    def session_storage(self):
+        """Session anchor storage used for cross-collection writer leases."""
+        if self._session_storage is None:
+            from src.infra.session.storage import SessionStorage
+
+            self._session_storage = SessionStorage()
+        return self._session_storage
+
+    async def acquire_session_trace_write(self, session_id: str) -> bool:
+        return await self.session_storage.acquire_trace_write(session_id)
+
+    async def release_session_trace_write(self, session_id: str) -> None:
+        await self.session_storage.release_trace_write(session_id)
 
     async def ensure_indexes_if_needed(self):
         """确保索引存在（由首次使用时调用）"""
@@ -613,6 +637,27 @@ class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
             if max_events is not None and max_events <= 0:
                 return SessionEventsSnapshot(events=[])
 
+            events_projection: Any = 1
+            if active_run_id:
+                events_projection = {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$eq": ["$status", "running"]},
+                                {"$eq": ["$run_id", active_run_id]},
+                            ]
+                        },
+                        {
+                            "$filter": {
+                                "input": {"$ifNull": ["$events", []]},
+                                "as": "event",
+                                "cond": {"$eq": ["$$event.event_type", "user:message"]},
+                            }
+                        },
+                        "$events",
+                    ]
+                }
+
             cursor = self.collection.find(
                 match_query,
                 {
@@ -621,7 +666,7 @@ class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
                     "run_id": 1,
                     "status": 1,
                     "started_at": 1,
-                    "events": 1,
+                    "events": events_projection,
                     "recommend_questions": 1,
                     "recommend_questions_updated_at": 1,
                 },
@@ -634,10 +679,25 @@ class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
                         continue
                 traces.append(trace)
 
-            events_by_trace = await self.read_trace_events_batch_compat(
-                traces,
-                event_types=event_types,
-            )
+            active_user_only_trace_ids = {
+                str(trace.get("trace_id"))
+                for trace in traces
+                if active_run_id
+                and trace.get("run_id") == active_run_id
+                and trace.get("status") == "running"
+                and trace.get("trace_id")
+            }
+            if active_user_only_trace_ids:
+                events_by_trace = await self.read_trace_events_batch_compat(
+                    traces,
+                    event_types=event_types,
+                    active_user_only_trace_ids=active_user_only_trace_ids,
+                )
+            else:
+                events_by_trace = await self.read_trace_events_batch_compat(
+                    traces,
+                    event_types=event_types,
+                )
             events: List[Dict[str, Any]] = []
             history_mode: Literal["complete", "active_user_only"] = "complete"
             stream_run_id: Optional[str] = None
@@ -818,6 +878,7 @@ class TraceStorage(TraceStorageWriteMixin, TraceEventChunkMixin):
             delattr(self, "_indexes_ensured")
         self._collection = None
         self._chunks_collection = None
+        self._session_storage = None
         self._merger = None
 
 

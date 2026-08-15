@@ -47,6 +47,9 @@ BATCH_SIZE = 100
 
 # 单批内并发合并的最大 trace 数量
 _MERGE_CONCURRENCY = 3
+_MERGE_TERMINAL_STATUSES = ("completed", "error")
+_ATTACHMENT_CHUNK_WRITE_FIELD = "attachment_chunk_write_operation"
+_TRACE_EVENT_REVISION_FIELD = "event_revision"
 
 
 def _get_merge_interval() -> float:
@@ -277,6 +280,13 @@ class EventMerger:
         """
         try:
             collection = self.trace_storage.collection
+            recover_replacements = getattr(
+                self.trace_storage,
+                "recover_incomplete_chunk_replacements",
+                None,
+            )
+            if callable(recover_replacements):
+                await recover_replacements()
 
             # 查询最近完成的 traces（未合并的）
             # 使用投影减少数据传输
@@ -284,19 +294,24 @@ class EventMerger:
             max_events_per_trace = _get_merge_max_events_per_trace()
             cursor = collection.find(
                 {
-                    "status": {"$ne": "running"},
+                    "status": {"$in": list(_MERGE_TERMINAL_STATUSES)},
                     "metadata.merged": {"$ne": True},
+                    _ATTACHMENT_CHUNK_WRITE_FIELD: {"$exists": False},
                     "$or": [
                         {"event_count": {"$lte": max_events_per_trace}},
                         {"event_count": {"$exists": False}},
                     ],
                 },
                 {
+                    "_id": 1,
                     "trace_id": 1,
                     "session_id": 1,
                     "run_id": 1,
                     "started_at": 1,
+                    "status": 1,
+                    "updated_at": 1,
                     "event_count": 1,
+                    _TRACE_EVENT_REVISION_FIELD: 1,
                     "metadata": 1,
                 },
             ).limit(batch_size)
@@ -377,6 +392,7 @@ class EventMerger:
             now = utc_now()
             operations = []
             merged_count = 0
+            directly_modified_count = 0
             skipped_count = 0
             error_count = 0
 
@@ -400,10 +416,20 @@ class EventMerger:
                 }
                 if len(merged_events) < len(original_events):
                     if getattr(settings, "SESSION_EVENT_CHUNK_STORAGE_ENABLED", False):
-                        await self.trace_storage.replace_trace_events_with_chunks(
+                        replaced = await self.trace_storage.replace_trace_events_with_chunks(
                             trace_doc,
                             merged_events,
+                            parent_updates={
+                                "metadata.merged": True,
+                                "metadata.merged_at": now,
+                            },
                         )
+                        if not replaced:
+                            skipped_count += 1
+                            continue
+                        directly_modified_count += 1
+                        merged_count += 1
+                        continue
                     else:
                         update_fields["events"] = merged_events
                         update_fields["event_count"] = len(merged_events)
@@ -411,12 +437,34 @@ class EventMerger:
                 else:
                     skipped_count += 1
 
-                operations.append(UpdateOne({"trace_id": trace_id}, {"$set": update_fields}))
+                update_query: Dict[str, Any] = {
+                    "trace_id": trace_id,
+                    "status": {"$in": list(_MERGE_TERMINAL_STATUSES)},
+                    _ATTACHMENT_CHUNK_WRITE_FIELD: {"$exists": False},
+                }
+                if trace_doc.get("_id") is not None:
+                    update_query["_id"] = trace_doc["_id"]
+                if trace_doc.get("updated_at") is not None:
+                    update_query["updated_at"] = trace_doc["updated_at"]
+                operations.append(
+                    UpdateOne(
+                        update_query,
+                        {
+                            "$inc": {_TRACE_EVENT_REVISION_FIELD: 1},
+                            "$set": update_fields,
+                        },
+                    )
+                )
 
             if operations:
                 bulk_result = await collection.bulk_write(operations, ordered=False)
-                return bulk_result.modified_count, merged_count, skipped_count, error_count
-            return 0, merged_count, skipped_count, error_count
+                return (
+                    directly_modified_count + bulk_result.modified_count,
+                    merged_count,
+                    skipped_count,
+                    error_count,
+                )
+            return directly_modified_count, merged_count, skipped_count, error_count
         except Exception as e:
             logger.error(f"Failed to write merged traces: {e}", exc_info=True)
             return 0, 0, 0, len(traces)

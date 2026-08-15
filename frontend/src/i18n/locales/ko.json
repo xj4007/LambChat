@@ -225,15 +225,15 @@
   "agents": {
     "fast": {
       "description": "샌드박스 없음, 빠른 응답, 일상 대화용",
-      "name": "Fast Agent"
+      "name": "빠른 에이전트"
     },
     "search": {
       "description": "코드 인터프리터 & 샌드박스 지원, 복잡한 작업용",
-      "name": "Search Agent"
+      "name": "검색 에이전트"
     },
     "team": {
       "description": "역할 기반 서브 에이전트에 작업을 라우팅합니다. 팀 미설정 시 단일 에이전트 모드로 폴백합니다.",
-      "name": "Team Agent"
+      "name": "팀 에이전트"
     }
   },
   "appName": "LambChat",
@@ -392,6 +392,7 @@
     "fileUploadNoPermission": "{{category}} 파일을 업로드할 권한이 없습니다.",
     "fileUrlFailed": "파일 URL 생성에 실패했습니다.",
     "instanceNameRequired": "인스턴스 이름은 필수입니다.",
+    "invalidAttachments": "하나 이상의 첨부 파일을 더 이상 사용할 수 없습니다. 삭제한 후 다시 업로드해 주세요.",
     "invalidCredentials": "사용자 이름 또는 비밀번호가 올바르지 않습니다.",
     "invalidDisabledTools": "비활성화 도구 목록이 올바르지 않습니다.",
     "invalidEnvKeyFormat": "환경 변수 키 형식이 올바르지 않습니다.",
@@ -1276,9 +1277,13 @@
     "composerRetry": "다시 시도",
     "composerUploadFailed": "업로드 실패",
     "composerUploading": "업로드 중",
+    "preparing": "이미지 처리 중…",
+    "serverProcessing": "서버에서 처리 중…",
     "dragDrop": "드래그 앤 드롭 또는 클릭하여 업로드",
     "dragDropHint": "파일을 여기에 끌어다 놓으세요",
     "dragDropOr": "또는 아래 버튼을 클릭하여 선택",
+    "clipboardImageUnavailable": "클립보드 이미지를 읽을 수 없습니다. 이미지를 다시 복사하거나 저장한 후 업로드해 주세요.",
+    "emptyFile": "파일이 비어 있어 업로드할 수 없습니다.",
     "effectiveLimits": "제한: 이미지 {{image}}MB / 비디오 {{video}}MB / 오디오 {{audio}}MB / 문서 {{document}}MB / 최대 {{maxFiles}} 파일",
     "fileTooLarge": "파일 크기가 제한을 초과했습니다",
     "maxFilesSummary": "업로드당 최대 {{maxFiles}}개 파일",
@@ -2281,9 +2286,10 @@
     "LANGSMITH_PROJECT": "LangSmith 프로젝트 이름",
     "LANGSMITH_SAMPLE_RATE": "LangSmith 샘플링 비율(0.0-1.0)",
     "LANGSMITH_TRACING": "LangSmith 추적 활성화",
-    "LLM_MAX_RETRIES": "LLM API 최대 재시도 횟수 (429 등 오류 처리용)",
+    "LLM_MAX_RETRIES": "첫 LLM 호출 실패 후 재시도 횟수(시간 초과, 네트워크, 속도 제한, 5xx)",
     "LLM_MODEL_CACHE_SIZE": "LLM 모델 인스턴스 캐시 크기(인스턴스당 약 10-30MB). 기본값 50, 다중 사용자/다중 파라미터 시나리오 지원. 너무 작으면 빈번한 생성/소멸, 너무 크면 메모리 소비 증가.",
     "LLM_RETRY_DELAY": "LLM API 재시도 기본 대기 시간(초, 지수 백오프 시작값)",
+    "LLM_REQUEST_TIMEOUT": "첫 스트리밍 이벤트 또는 전체 비스트리밍 응답의 최대 대기 시간(초)",
     "LOCAL_STORAGE_PATH": "S3가 활성화되지 않은 경우의 로컬 스토리지 경로(기본값: ./uploads)",
     "LOG_LEVEL": "로그 수준 (DEBUG, INFO, WARNING, ERROR)",
     "MCP_EFFECTIVE_CONFIG_MAX_SERVERS": "유효 설정에서 허용되는 최대 MCP 서버 수",
@@ -2357,8 +2363,6 @@
     "POSTGRES_POOL_MIN_SIZE": "PostgreSQL 연결 풀 최소 크기",
     "POSTGRES_PORT": "PostgreSQL 포트",
     "POSTGRES_USER": "PostgreSQL 사용자 이름",
-    "PROMPT_CACHE_MAX_SYSTEM_BLOCKS": "캐시할 시스템 프롬프트 블록 최대 수",
-    "PROMPT_CACHE_MAX_TOOLS": "캐시할 도구 정의 최대 수",
     "RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS": "추천 질문 생성 최대 동시 백그라운드 작업 수",
     "REDIS_PASSWORD": "Redis 비밀번호",
     "REDIS_URL": "Redis 연결 URL",

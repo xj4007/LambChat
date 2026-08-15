@@ -23,19 +23,18 @@ LambChat supports multi-model management through the UI. The env vars above set 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DEFAULT_MODEL_ID` | _(empty)_ | Admin model configuration ID used as the default for new sessions and background jobs. Empty = first enabled model. |
-| `LLM_MAX_RETRIES` | `3` | Maximum number of API retries on failure. |
-| `LLM_RETRY_DELAY` | `1.0` | Delay between retries in seconds. |
+| `LLM_MAX_RETRIES` | `3` | Retries after the initial call for timeout, network, rate-limit, and 5xx failures. `3` means up to 4 attempts. |
+| `LLM_RETRY_DELAY` | `1.0` | Initial retry delay in seconds (exponential backoff). |
+| `LLM_REQUEST_TIMEOUT` | `120` | Seconds allowed for the first streaming event or a complete non-streaming response. Streaming has no total duration limit after its first event. |
 | `LLM_MODEL_CACHE_SIZE` | `50` | Model instance cache size. Prevents memory leaks from repeated instantiation. |
 | `LLM_MAX_INPUT_TOKENS` | _(none)_ | Optional: context window size for DeepAgent auto-summarization. |
 | `LLM_TEMPERATURE` | _(none)_ | Optional: default temperature for LLM calls. |
 | `LLM_MAX_TOKENS` | _(none)_ | Optional: max output tokens for LLM calls. |
 
-## Prompt Cache Settings
+## DeepAgent Context Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROMPT_CACHE_MAX_SYSTEM_BLOCKS` | `12` | Maximum cached system prompt blocks. |
-| `PROMPT_CACHE_MAX_TOOLS` | `12` | Maximum cached tool definitions. |
 | `DEEPAGENT_DEFAULT_MAX_INPUT_TOKENS` | `64000` | Default max input tokens for DeepAgent. |
 
 ## Example
@@ -47,5 +46,6 @@ LLM_API_BASE=https://api.openai.com/v1
 LLM_MODEL=gpt-4o
 LLM_MAX_RETRIES=3
 LLM_RETRY_DELAY=1.0
+LLM_REQUEST_TIMEOUT=120
 LLM_MODEL_CACHE_SIZE=50
 ```

@@ -192,26 +192,19 @@ CORE_SETTING_DEFINITIONS: dict[str, dict] = {
         "description": "settingDesc.LLM_RETRY_DELAY",
         "default": 1.0,
     },
+    "LLM_REQUEST_TIMEOUT": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.LLM,
+        "subcategory": "retry",
+        "description": "settingDesc.LLM_REQUEST_TIMEOUT",
+        "default": 120.0,
+    },
     "LLM_MODEL_CACHE_SIZE": {
         "type": SettingType.NUMBER,
         "category": SettingCategory.LLM,
         "subcategory": "cache",
         "description": "settingDesc.LLM_MODEL_CACHE_SIZE",
         "default": 50,
-    },
-    "PROMPT_CACHE_MAX_SYSTEM_BLOCKS": {
-        "type": SettingType.NUMBER,
-        "category": SettingCategory.LLM,
-        "subcategory": "cache",
-        "description": "settingDesc.PROMPT_CACHE_MAX_SYSTEM_BLOCKS",
-        "default": 4,
-    },
-    "PROMPT_CACHE_MAX_TOOLS": {
-        "type": SettingType.NUMBER,
-        "category": SettingCategory.LLM,
-        "subcategory": "cache",
-        "description": "settingDesc.PROMPT_CACHE_MAX_TOOLS",
-        "default": 2,
     },
     "DEEPAGENT_SUMMARIZATION_TRIGGER_RATIO": {
         "type": SettingType.NUMBER,

@@ -25,6 +25,7 @@ from src.agents.core.node_utils import (
     resolve_model_supports_vision,
 )
 from src.agents.core.persona import build_persona_prompt_sections
+from src.agents.core.startup_preparation import prepare_agent_inputs
 from src.agents.core.subagent_prompts import (
     AUTO_MODE_PROMPT_SECTION,
     CODEBASE_INVESTIGATOR_PROMPT,
@@ -44,12 +45,10 @@ from src.infra.agent.middleware import (
     ArtifactDeliveryMiddleware,
     ImageUrlToBase64Middleware,
     MainAgentContextMiddleware,
-    PromptCachingMiddleware,
     SectionPromptMiddleware,
     SubagentActivityMiddleware,
     SubagentResultHandoffMiddleware,
     ToolResultBinaryMiddleware,
-    VolatileSectionPromptMiddleware,
     create_code_interpreter_middleware,
     create_retry_middleware,
 )
@@ -100,36 +99,6 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
     # 获取附件
     attachments = state.get("attachments", [])
 
-    # 创建 LLM
-    llm_start = time.time()
-    llm = await LLMClient.get_model(
-        model=selected_model,
-        model_id=model_id,
-        model_config=resolved_model_config,
-        thinking=thinking_config,
-    )
-    llm_init_time = time.time() - llm_start
-    logger.debug(f"[FastAgent] LLM init: {llm_init_time * 1000:.3f}ms")
-
-    # 查询 fallback_model 配置
-    fallback_model_value = agent_options.get("_resolved_fallback_model")
-    if "_resolved_fallback_model" not in agent_options:
-        fallback_model_value = await resolve_fallback_model(
-            model_id, selected_model, log_prefix="[FastAgent]"
-        )
-    supports_vision = agent_options.get("_resolved_supports_vision")
-    if supports_vision is None:
-        supports_vision = await resolve_model_supports_vision(
-            model_id, selected_model, log_prefix="[FastAgent]"
-        )
-    supports_vision = bool(supports_vision)
-    image_url_to_base64 = agent_options.get("_resolved_image_url_to_base64")
-    if image_url_to_base64 is None:
-        image_url_to_base64 = await resolve_model_image_url_to_base64(
-            model_id, selected_model, log_prefix="[FastAgent]"
-        )
-    image_url_to_base64 = bool(image_url_to_base64)
-
     # 多租户隔离
     tenant_id = context.user_id or "default"
     assistant_id = f"assistant-{tenant_id}"
@@ -137,47 +106,88 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
     # 构建 persona + skills 提示
     persona_sections = build_persona_prompt_sections(configurable.get("persona_system_prompt"))
 
-    skills_prompt = ""
-    if settings.ENABLE_SKILLS and context.skills:
-        try:
-            skills_start = time.time()
-            skills_prompt = await build_skills_prompt(context.skills)
-            skills_init_time = time.time() - skills_start
-            logger.debug(f"[FastAgent] Skills prompt init: {skills_init_time * 1000:.3f}ms")
-        except Exception as e:
-            logger.warning(f"Failed to build skills prompt: {e}")
-
     # 构建记忆系统提示
     memory_guide = get_memory_guide() if settings.ENABLE_MEMORY else ""
 
-    # 构建系统提示（persona 由 SectionPromptMiddleware 注入，保持基础提示词稳定以优化 KV 缓存）
+    # 构建系统提示（persona 由 SectionPromptMiddleware 注入）
     system_prompt = FAST_SYSTEM_PROMPT
 
-    # 创建 backend（无沙箱，PostgreSQL 或 MongoDB 由 store 决定）
-    backend_start = time.time()
     session_id = state.get("session_id", str(uuid.uuid4()))
-    backend = create_persistent_backend(
-        assistant_id=assistant_id,
-        user_id=context.user_id,
-        session_id=session_id,
-    )
-    logger.info(f"[FastAgent] Using PersistentBackend for assistant: {assistant_id}")
-    backend_init_time = time.time() - backend_start
-    logger.debug(f"[FastAgent] Backend init: {backend_init_time * 1000:.3f}ms")
 
-    # 创建 store（优先 PostgreSQL → MongoDB fallback）
-    store = await acreate_store()
+    async def _load_model_bundle() -> tuple[Any, Any, bool, bool]:
+        llm_start = time.time()
+        model = await LLMClient.get_model(
+            model=selected_model,
+            model_id=model_id,
+            model_config=resolved_model_config,
+            thinking=thinking_config,
+        )
+        logger.debug(f"[FastAgent] LLM init: {(time.time() - llm_start) * 1000:.3f}ms")
+        fallback = agent_options.get("_resolved_fallback_model")
+        if "_resolved_fallback_model" not in agent_options:
+            fallback = await resolve_fallback_model(
+                model_id, selected_model, log_prefix="[FastAgent]"
+            )
+        vision = agent_options.get("_resolved_supports_vision")
+        if vision is None:
+            vision = await resolve_model_supports_vision(
+                model_id, selected_model, log_prefix="[FastAgent]"
+            )
+        convert_images = agent_options.get("_resolved_image_url_to_base64")
+        if convert_images is None:
+            convert_images = await resolve_model_image_url_to_base64(
+                model_id, selected_model, log_prefix="[FastAgent]"
+            )
+        return model, fallback, bool(vision), bool(convert_images)
 
-    # 过滤工具（懒加载 MCP 工具）
-    get_tools = getattr(context, "get_tools", None)
-    if callable(get_tools):
-        maybe_tools = get_tools()
-        if inspect.isawaitable(maybe_tools):
-            await maybe_tools
-    filter_tools = getattr(context, "filter_tools", None)
-    filtered_tool_list = list(
-        filter_tools() if callable(filter_tools) else getattr(context, "tools", [])
+    async def _load_backend_bundle() -> tuple[Any, Any]:
+        backend_start = time.time()
+        loaded_backend = create_persistent_backend(
+            assistant_id=assistant_id,
+            user_id=context.user_id,
+            session_id=session_id,
+        )
+        logger.info(f"[FastAgent] Using PersistentBackend for assistant: {assistant_id}")
+        loaded_store = await acreate_store()
+        logger.debug(f"[FastAgent] Backend init: {(time.time() - backend_start) * 1000:.3f}ms")
+        return loaded_backend, loaded_store
+
+    async def _load_skills_prompt() -> str:
+        if not settings.ENABLE_SKILLS or not context.skills:
+            return ""
+        try:
+            skills_start = time.time()
+            prompt = await build_skills_prompt(context.skills)
+            logger.debug(
+                f"[FastAgent] Skills prompt init: {(time.time() - skills_start) * 1000:.3f}ms"
+            )
+            return prompt
+        except Exception as exc:
+            logger.warning("Failed to build skills prompt: %s", exc)
+            return ""
+
+    async def _load_context_tools() -> list[Any]:
+        get_tools = getattr(context, "get_tools", None)
+        if callable(get_tools):
+            maybe_tools = get_tools()
+            if inspect.isawaitable(maybe_tools):
+                await maybe_tools
+        filter_tools = getattr(context, "filter_tools", None)
+        return list(filter_tools() if callable(filter_tools) else getattr(context, "tools", []))
+
+    prepared = await prepare_agent_inputs(
+        model=_load_model_bundle(),
+        backend=_load_backend_bundle(),
+        skills_prompt=_load_skills_prompt(),
+        tools=_load_context_tools(),
+        checkpointer=get_async_checkpointer(thread_id=state.get("session_id")),
     )
+    llm, fallback_model_value, supports_vision, image_url_to_base64 = prepared.model
+    backend, store = prepared.backend
+    skills_prompt = prepared.skills_prompt
+    filtered_tool_list = prepared.tools
+    inner_checkpointer = prepared.checkpointer
+
     if context.deferred_manager is not None and not any(
         getattr(tool, "name", "") == "search_tools" for tool in filtered_tool_list
     ):
@@ -203,12 +213,6 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
         )
     else:
         logger.warning("[FastAgent] filtered_tools is None — no tools will be passed to LLM!")
-
-    # 创建内层 graph (deep agent)
-    checkpointer_start = time.time()
-    inner_checkpointer = await get_async_checkpointer(thread_id=state.get("session_id"))
-    checkpointer_init_time = time.time() - checkpointer_start
-    logger.debug(f"[FastAgent] Checkpointer init: {checkpointer_init_time * 1000:.3f}ms")
 
     graph_compile_start = time.time()
 
@@ -239,7 +243,6 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
                     search_limit=settings.DEFERRED_TOOL_SEARCH_LIMIT,
                 )
             )
-        mw.append(PromptCachingMiddleware())
         return mw
 
     custom_subagents: list[SubAgent | CompiledSubAgent] = [
@@ -275,8 +278,7 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
         },
     ]
 
-    # 构建中间件栈：retry → binary upload → skills+memory → memory_index → tool search → cache tag
-    # Order: stable → semi-stable → dynamic → cache breakpoint
+    # 构建中间件栈：retry → binary upload → authored prompts → memory_index → tool search
     user_middleware = create_retry_middleware(
         fallback_model=fallback_model_value, thinking=thinking_config
     )
@@ -284,21 +286,18 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
     user_middleware.append(ArtifactDeliveryMiddleware())
     if image_url_to_base64:
         user_middleware.append(ImageUrlToBase64Middleware())
-    # Skills + memory guide: session-static (one SectionPromptMiddleware, multiple blocks)
-    # persona_sections returns 0-2 blocks (role + behavior) for fine-grained KV cache
+    active_goal = configurable.get("active_goal")
+    goal_section = build_goal_prompt_section(active_goal)
+    auto_section = AUTO_MODE_PROMPT_SECTION if configurable.get("auto_mode") else None
+    # Persona, skills, memory guidance, goal, and mode share one authored prompt block.
     _prompt_sections = [
         s
         for s in (*MAIN_AGENT_PROMPT_SECTIONS, *persona_sections, skills_prompt, memory_guide)
         if s
     ]
+    _prompt_sections.extend(section for section in (goal_section, auto_section) if section)
     if _prompt_sections:
         user_middleware.append(SectionPromptMiddleware(sections=_prompt_sections))
-    active_goal = configurable.get("active_goal")
-    goal_section = build_goal_prompt_section(active_goal)
-    auto_section = AUTO_MODE_PROMPT_SECTION if configurable.get("auto_mode") else None
-    _volatile_sections = [section for section in (goal_section, auto_section) if section]
-    if _volatile_sections:
-        user_middleware.append(VolatileSectionPromptMiddleware(sections=_volatile_sections))
     if settings.ENABLE_MEMORY and settings.NATIVE_MEMORY_INDEX_ENABLED and context.user_id:
         from src.infra.agent.middleware import MemoryIndexMiddleware
 
@@ -326,9 +325,6 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
 
     user_middleware.append(MainAgentContextMiddleware(backend=backend))
     user_middleware.append(SubagentResultHandoffMiddleware(backend=backend))
-
-    # KV cache: tag final system block + last tool AFTER all dynamic injection
-    user_middleware.append(PromptCachingMiddleware())
 
     inner_graph = create_deep_agent(
         model=llm,

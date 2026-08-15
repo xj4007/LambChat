@@ -17,7 +17,7 @@ from src.infra.logging import get_logger
 from src.infra.session.storage import SessionStorage
 from src.kernel.config import settings
 
-from .arq_payloads import TaskArqPayloadStore
+from .arq_payloads import TaskArqPayloadStore, UserMessageSearchIndexPayloadStore
 from .arq_settings import build_arq_redis_settings
 from .cancellation import TaskCancellation
 from .exceptions import TaskInterruptedError
@@ -126,27 +126,57 @@ class BackgroundTaskManager:
         display_message: str | None,
         attachments: Optional[List[Dict[str, Any]]],
         enabled_skills: Optional[List[str]] = None,
+        attachment_references_claimed: bool = False,
+        schedule_search_index: bool = True,
     ) -> str:
         """Persist the user message before the background worker starts."""
         from src.agents.core import resolve_agent_name
         from src.infra.writer.present import Presenter, PresenterConfig
 
-        presenter = Presenter(
-            PresenterConfig(
-                session_id=session_id,
-                agent_id=agent_id,
-                agent_name=resolve_agent_name(agent_id),
-                user_id=user_id,
-                run_id=run_id,
-                trace_id=trace_id,
-                enable_storage=True,
+        try:
+            presenter = Presenter(
+                PresenterConfig(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    agent_name=resolve_agent_name(agent_id),
+                    user_id=user_id,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    enable_storage=True,
+                )
             )
-        )
-        await presenter._ensure_trace()
+            await presenter._ensure_trace()
+        except Exception:
+            await self._release_preclaimed_attachment_references(
+                attachments,
+                user_id,
+                attachment_references_claimed,
+            )
+            raise
         await presenter.emit_user_message(
-            display_message or message, attachments=attachments, enabled_skills=enabled_skills
+            display_message or message,
+            attachments=attachments,
+            enabled_skills=enabled_skills,
+            attachment_references_claimed=attachment_references_claimed,
+            schedule_search_index=schedule_search_index,
         )
         return presenter.trace_id
+
+    @staticmethod
+    async def _release_preclaimed_attachment_references(
+        attachments: Optional[List[Dict[str, Any]]],
+        user_id: str,
+        attachment_references_claimed: bool,
+    ) -> None:
+        if not attachment_references_claimed:
+            return
+
+        from src.infra.upload.file_record import FileRecordStorage
+        from src.infra.writer.presenter_config import _extract_attachment_keys
+
+        attachment_keys = _extract_attachment_keys(attachments)
+        if attachment_keys:
+            await FileRecordStorage().release_owned_references(attachment_keys, user_id)
 
     def _status_queries(self) -> TaskStatusQueries:
         return TaskStatusQueries(storage=self.storage, run_info=self._run_info)
@@ -257,6 +287,7 @@ class BackgroundTaskManager:
         session_metadata: Optional[Dict[str, Any]] = None,
         user_message_written: bool = False,
         write_user_message_immediately: bool = False,
+        attachment_references_claimed: bool = False,
     ) -> Tuple[str, str]:
         """
         提交后台任务
@@ -284,19 +315,28 @@ class BackgroundTaskManager:
 
         async with self._lock:
             # 确保 session 记录存在
-            await task_executor.ensure_session(
-                session_id,
-                agent_id,
-                user_id,
-                project_id=project_id,
-                session_name=session_name,
-                session_metadata=session_metadata,
-            )
+            try:
+                await task_executor.ensure_session(
+                    session_id,
+                    agent_id,
+                    user_id,
+                    project_id=project_id,
+                    session_name=session_name,
+                    session_metadata=session_metadata,
+                )
 
-            # 更新 MongoDB session 状态（包含 current_run_id）
-            await task_executor._update_session_status(
-                session_id, TaskStatus.PENDING, run_id=run_id
-            )
+                # 更新 MongoDB session 状态（包含 current_run_id）
+                await task_executor._update_session_status(
+                    session_id, TaskStatus.PENDING, run_id=run_id
+                )
+            except Exception:
+                if not user_message_written:
+                    await self._release_preclaimed_attachment_references(
+                        attachments,
+                        user_id,
+                        attachment_references_claimed,
+                    )
+                raise
 
             if write_user_message_immediately and not user_message_written:
                 trace_id = await self._persist_initial_user_message(
@@ -309,6 +349,7 @@ class BackgroundTaskManager:
                     display_message=display_message,
                     attachments=attachments,
                     enabled_skills=enabled_skills,
+                    attachment_references_claimed=attachment_references_claimed,
                 )
                 user_message_written = True
 
@@ -318,6 +359,7 @@ class BackgroundTaskManager:
                 "agent_id": agent_id,
                 "user_id": user_id,
                 "user_message_written": user_message_written,
+                "attachment_references_claimed": attachment_references_claimed,
             }
 
             # 创建后台任务
@@ -343,6 +385,7 @@ class BackgroundTaskManager:
                     active_goal=active_goal,
                     auto_mode=auto_mode,
                     user_message_written=user_message_written,
+                    attachment_references_claimed=attachment_references_claimed,
                 )
             )
             self._tasks[run_id] = task
@@ -375,33 +418,50 @@ class BackgroundTaskManager:
         trace_id: Optional[str] = None,
         user_message_written: bool = False,
         payload_store: Optional[TaskArqPayloadStore] = None,
+        search_index_payload_store: Optional[UserMessageSearchIndexPayloadStore] = None,
         arq_pool: Any | None = None,
         team_id: Optional[str] = None,
         active_goal: Optional[Dict[str, Any]] = None,
         auto_mode: bool = False,
         session_metadata: Optional[Dict[str, Any]] = None,
         write_user_message_immediately: bool = False,
+        attachment_references_claimed: bool = False,
+        index_user_message: bool = False,
     ) -> Tuple[str, str]:
         """Submit a task to arq after persisting serializable task context."""
         task_executor = self._ensure_executor()
         run_id = run_id or generate_run_id()
         trace_id = trace_id or ""
         payload_store = payload_store or TaskArqPayloadStore()
+        search_index_payload_store = (
+            search_index_payload_store or UserMessageSearchIndexPayloadStore()
+        )
+        should_index_user_message = write_user_message_immediately or index_user_message
+        search_index_content = display_message or message
 
         async with self._lock:
-            await task_executor.ensure_session(
-                session_id,
-                agent_id,
-                user_id,
-                project_id=project_id,
-                session_name=session_name,
-                session_metadata=session_metadata,
-            )
-            await task_executor._update_session_status(
-                session_id,
-                TaskStatus.QUEUED,
-                run_id=run_id,
-            )
+            try:
+                await task_executor.ensure_session(
+                    session_id,
+                    agent_id,
+                    user_id,
+                    project_id=project_id,
+                    session_name=session_name,
+                    session_metadata=session_metadata,
+                )
+                await task_executor._update_session_status(
+                    session_id,
+                    TaskStatus.QUEUED,
+                    run_id=run_id,
+                )
+            except Exception:
+                if not user_message_written:
+                    await self._release_preclaimed_attachment_references(
+                        attachments,
+                        user_id,
+                        attachment_references_claimed,
+                    )
+                raise
             if write_user_message_immediately and not user_message_written:
                 trace_id = await self._persist_initial_user_message(
                     session_id=session_id,
@@ -413,6 +473,8 @@ class BackgroundTaskManager:
                     display_message=display_message,
                     attachments=attachments,
                     enabled_skills=enabled_skills,
+                    attachment_references_claimed=attachment_references_claimed,
+                    schedule_search_index=False,
                 )
                 user_message_written = True
 
@@ -435,16 +497,44 @@ class BackgroundTaskManager:
                     "persona_system_prompt": persona_system_prompt,
                     "disabled_mcp_tools": disabled_mcp_tools,
                     "user_message_written": user_message_written,
+                    "attachment_references_claimed": attachment_references_claimed,
                     "team_id": team_id,
                     "active_goal": active_goal,
                     "recommendation_input": recommendation_input,
                     "auto_mode": auto_mode,
                 },
             )
+            if should_index_user_message and search_index_content:
+                await search_index_payload_store.save(
+                    run_id,
+                    {
+                        "session_id": session_id,
+                        "content": search_index_content,
+                    },
+                )
 
         if arq_pool is None:
             arq_pool = await self._get_arq_pool()
-        await arq_pool.enqueue_job("run_agent_task", run_id, _job_id=run_id)
+        enqueue_operations = [
+            arq_pool.enqueue_job("run_agent_task", run_id, _job_id=run_id),
+        ]
+        if should_index_user_message and search_index_content:
+            enqueue_operations.append(
+                arq_pool.enqueue_job(
+                    "update_user_message_search_index",
+                    run_id,
+                    _job_id=f"user-message-search-index:{run_id}",
+                )
+            )
+        enqueue_results = await asyncio.gather(*enqueue_operations, return_exceptions=True)
+        main_enqueue_result = enqueue_results[0]
+        if isinstance(main_enqueue_result, BaseException):
+            raise main_enqueue_result
+        if len(enqueue_results) > 1 and isinstance(enqueue_results[1], BaseException):
+            logger.warning(
+                "Failed to enqueue distributed user-message search-index job: run_id=%s",
+                run_id,
+            )
 
         logger.info(
             "Task submitted to arq: session=%s, run_id=%s, agent=%s", session_id, run_id, agent_id

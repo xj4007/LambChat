@@ -12,31 +12,22 @@ from langchain.agents.middleware.types import (
     ModelResponse,
     ResponseT,
 )
-from langchain_core.messages import SystemMessage
 
 from src.infra.agent.middleware._helpers import (
     _append_system_text_block,
-    _append_system_text_blocks,
     _normalize_prompt_text,
-    _system_message_to_blocks,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class SectionPromptMiddleware(AgentMiddleware):
-    """Append one or more deterministic prompt sections as separate system blocks.
-
-    Each section becomes its own content block in the system message, enabling
-    fine-grained KV cache breakpoints.  Sections are normalized (trailing
-    whitespace stripped) at construction time and batch-appended in a single
-    pass to avoid O(n²) block-list rebuilding.
-    """
+    """Append normalized prompt sections as one system text block."""
 
     def __init__(self, *, sections: list[str] | tuple[str, ...]) -> None:
         super().__init__()
-        self._sections = tuple(
-            _normalize_prompt_text(section) for section in sections if section.strip()
+        self._prompt = "\n\n".join(
+            normalized for section in sections if (normalized := _normalize_prompt_text(section))
         )
 
     async def awrap_model_call(
@@ -44,36 +35,11 @@ class SectionPromptMiddleware(AgentMiddleware):
         request: ModelRequest[ContextT],
         handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
     ) -> ModelResponse[ResponseT]:
-        if not self._sections:
+        if not self._prompt:
             return await handler(request)
 
-        # Batch-append all sections in one pass (avoids repeated _system_message_to_blocks)
-        blocks = _system_message_to_blocks(request.system_message)
-        blocks.extend({"type": "text", "text": section} for section in self._sections)
-        request = request.override(system_message=SystemMessage(content=blocks))
-        return await handler(request)
-
-
-class VolatileSectionPromptMiddleware(AgentMiddleware):
-    """Append run-varying goal and execution-mode sections after stable context."""
-
-    def __init__(self, *, sections: list[str] | tuple[str, ...]) -> None:
-        super().__init__()
-        self._sections = tuple(
-            _normalize_prompt_text(section) for section in sections if section.strip()
-        )
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[ContextT],
-        handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
-    ) -> ModelResponse[ResponseT]:
-        if not self._sections:
-            return await handler(request)
-
-        blocks = _system_message_to_blocks(request.system_message)
-        blocks.extend({"type": "text", "text": section} for section in self._sections)
-        request = request.override(system_message=SystemMessage(content=blocks))
+        system_message = _append_system_text_block(request.system_message, self._prompt)
+        request = request.override(system_message=system_message)
         return await handler(request)
 
 
@@ -141,10 +107,10 @@ class EnvVarPromptMiddleware(AgentMiddleware):
         request: ModelRequest[ContextT],
         handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
     ) -> ModelResponse[ResponseT]:
-        from src.infra.tool.env_var_prompt import build_env_var_prompt_sections
+        from src.infra.tool.env_var_prompt import build_env_var_prompt
 
-        prompt_sections = await build_env_var_prompt_sections(self._user_id)
-        if prompt_sections:
-            new_system_message = _append_system_text_blocks(request.system_message, prompt_sections)
+        prompt = await build_env_var_prompt(self._user_id)
+        if prompt:
+            new_system_message = _append_system_text_block(request.system_message, prompt)
             request = request.override(system_message=new_system_message)
         return await handler(request)

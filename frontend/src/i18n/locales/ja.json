@@ -225,15 +225,15 @@
   "agents": {
     "fast": {
       "description": "サンドボックスなし、高速レスポンス、日常会話向け",
-      "name": "Fast Agent"
+      "name": "ファストエージェント"
     },
     "search": {
       "description": "コードインタープリター＆サンドボックス対応、複雑なタスク向け",
-      "name": "Search Agent"
+      "name": "検索エージェント"
     },
     "team": {
       "description": "ロールベースでサブエージェントにタスクをルーティング。チーム未設定時は単一エージェントモードにフォールバック。",
-      "name": "Team Agent"
+      "name": "チームエージェント"
     }
   },
   "appName": "LambChat",
@@ -392,6 +392,7 @@
     "fileUploadNoPermission": "{{category}} ファイルをアップロードする権限がありません。",
     "fileUrlFailed": "ファイルURLの生成に失敗しました。",
     "instanceNameRequired": "インスタンス名は必須です。",
+    "invalidAttachments": "1つ以上の添付ファイルが利用できなくなっています。削除して再度アップロードしてください。",
     "invalidCredentials": "ユーザー名またはパスワードが正しくありません。",
     "invalidDisabledTools": "無効な無効化ツール一覧です。",
     "invalidEnvKeyFormat": "環境変数キーの形式が無効です。",
@@ -1276,9 +1277,13 @@
     "composerRetry": "再試行",
     "composerUploadFailed": "アップロード失敗",
     "composerUploading": "アップロード中",
+    "preparing": "画像を処理中…",
+    "serverProcessing": "サーバーで処理中…",
     "dragDrop": "ドラッグ＆ドロップまたはクリックしてアップロード",
     "dragDropHint": "ファイルをここにドラッグ＆ドロップ",
     "dragDropOr": "または下のボタンをクリックして選択",
+    "clipboardImageUnavailable": "クリップボードの画像を読み取れません。画像をもう一度コピーするか、保存してからアップロードしてください。",
+    "emptyFile": "ファイルが空のためアップロードできません。",
     "effectiveLimits": "制限：画像 {{image}}MB / 動画 {{video}}MB / 音声 {{audio}}MB / ドキュメント {{document}}MB / 最大 {{maxFiles}} ファイル",
     "fileTooLarge": "ファイルサイズが制限を超えています",
     "maxFilesSummary": "1回のアップロード最大 {{maxFiles}} ファイル",
@@ -2281,9 +2286,10 @@
     "LANGSMITH_PROJECT": "LangSmithプロジェクト名",
     "LANGSMITH_SAMPLE_RATE": "LangSmithサンプリングレート（0.0-1.0）",
     "LANGSMITH_TRACING": "LangSmithトレースを有効化",
-    "LLM_MAX_RETRIES": "LLM APIの最大リトライ回数（429等のエラー処理用）",
+    "LLM_MAX_RETRIES": "最初のLLM呼び出し失敗後の再試行回数（タイムアウト、ネットワーク、レート制限、5xx）",
     "LLM_MODEL_CACHE_SIZE": "LLMモデルインスタンスキャッシュサイズ（各インスタンス約10-30MB）。デフォルト50、マルチユーザー/マルチパラメータシナリオに対応。小さすぎると頻繁な作成/破棄、大きすぎるとメモリ消費増加。",
     "LLM_RETRY_DELAY": "LLM APIのリトライ基本待機時間（秒、指数バックオフ開始値）",
+    "LLM_REQUEST_TIMEOUT": "最初のストリーミングイベントまたは完全な非ストリーミング応答を待つ最大秒数",
     "LOCAL_STORAGE_PATH": "S3が有効でない場合のローカルストレージパス（デフォルト：./uploads）",
     "LOG_LEVEL": "ログレベル（DEBUG, INFO, WARNING, ERROR）",
     "MCP_EFFECTIVE_CONFIG_MAX_SERVERS": "有効な設定で許可される最大 MCP サーバー数",
@@ -2357,8 +2363,6 @@
     "POSTGRES_POOL_MIN_SIZE": "PostgreSQL接続プール最小サイズ",
     "POSTGRES_PORT": "PostgreSQLポート",
     "POSTGRES_USER": "PostgreSQLユーザー名",
-    "PROMPT_CACHE_MAX_SYSTEM_BLOCKS": "キャッシュするシステムプロンプトブロックの最大数",
-    "PROMPT_CACHE_MAX_TOOLS": "キャッシュするツール定義の最大数",
     "RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS": "おすすめ質問生成の最大並行バックグラウンドタスク数",
     "REDIS_PASSWORD": "Redisパスワード",
     "REDIS_URL": "Redis接続URL",

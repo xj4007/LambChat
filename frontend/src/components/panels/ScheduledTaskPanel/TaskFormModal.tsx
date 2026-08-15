@@ -32,7 +32,7 @@ import type { PersonaPreset } from "../../../types/personaPreset";
 import type { Team } from "../../../types/team";
 import { personaPresetApi } from "../../../services/api/personaPreset";
 import { teamApi } from "../../../services/api/team";
-import { getFullUrl, uploadApi } from "../../../services/api";
+import { getFullUrl } from "../../../services/api";
 import { useFileUpload } from "../../../hooks/useFileUpload";
 import { AttachmentCard } from "../../common/AttachmentCard";
 import { FileUploadButton } from "../../chat/FileUploadButton";
@@ -164,10 +164,11 @@ export function TaskFormModal({
   const [isSaving, setIsSaving] = useState(false);
   const [jsonError, setJsonError] = useState<string | null>(null);
   const isTeamAgent = agentId === "team";
-  const { cancelUpload } = useFileUpload({
+  const uploadController = useFileUpload({
     attachments,
     onAttachmentsChange: setAttachments,
   });
+  const { cancelUpload } = uploadController;
   const hasUploadingAttachment = attachments.some((item) => item.isUploading);
 
   useEffect(() => {
@@ -283,9 +284,6 @@ export function TaskFormModal({
   );
   const handleRemoveAttachment = (attachment: MessageAttachment) => {
     setAttachments((prev) => prev.filter((item) => item.id !== attachment.id));
-    if (attachment.key && !attachment.isUploading) {
-      uploadApi.deleteFile(attachment.key).catch(() => {});
-    }
   };
 
   return (
@@ -568,10 +566,7 @@ export function TaskFormModal({
               <label className="scheduled-task-label">
                 {t("chat.attachments")}
               </label>
-              <FileUploadButton
-                attachments={attachments}
-                onAttachmentsChange={setAttachments}
-              />
+              <FileUploadButton uploadController={uploadController} />
             </div>
             {attachments.length > 0 && (
               <div className="flex gap-3 overflow-x-auto attachment-scroll pb-1">

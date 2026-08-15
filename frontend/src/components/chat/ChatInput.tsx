@@ -55,17 +55,15 @@ import type {
   RichChatComposerHandle,
 } from "./richComposer/RichChatComposer";
 import { buildLongTextClientMeta } from "./longTextConversion";
-import { uploadApi } from "../../services/api";
 import { getComposerCaretBoundary } from "./chatInputCaret";
 import type { ComposerArrowDirection } from "./richComposer/ArrowKeyPlugin";
-
+import { selectVisibleDraftAttachments } from "./acceptedDraftCleanup";
+import { useAcceptedDraftSubmission } from "./useAcceptedDraftSubmission";
 const RichChatComposer = lazy(async () => {
   const module = await import("./richComposer/RichChatComposer");
   return { default: module.RichChatComposer };
 });
-
 export type { ChatInputProps } from "./chatInputTypes";
-
 export const ChatInput = memo(function ChatInput({
   onSend,
   onStop,
@@ -137,7 +135,6 @@ export const ChatInput = memo(function ChatInput({
   const composerRef = useRef<RichChatComposerHandle>(null);
   const [activeReferenceIds, setActiveReferenceIds] = useState<string[]>([]);
   const longTextResourcesRef = useRef(new Map<string, LongTextPastePayload>());
-
   // Consume external pendingInput: fill textarea and focus
   useEffect(() => {
     if (pendingInput) {
@@ -488,11 +485,6 @@ export const ChatInput = memo(function ChatInput({
       setAttachments((previous) =>
         previous.filter((item) => item.id !== attachment.id),
       );
-      if (attachment.key && !attachment.isUploading) {
-        uploadApi.deleteFile(attachment.key).catch((error) => {
-          console.error("Failed to delete restored long text file:", error);
-        });
-      }
     },
     [restoreLongTextAttachment, setAttachments],
   );
@@ -513,48 +505,10 @@ export const ChatInput = memo(function ChatInput({
     }
   }, [attachments]);
 
-  const activeReferenceIdSet = useMemo(
-    () => new Set(activeReferenceIds),
-    [activeReferenceIds],
-  );
   const visibleAttachments = useMemo(
-    () =>
-      attachments.filter(
-        (attachment) =>
-          !attachment.composerReferenceId ||
-          activeReferenceIdSet.has(attachment.composerReferenceId),
-      ),
-    [activeReferenceIdSet, attachments],
+    () => selectVisibleDraftAttachments(attachments, activeReferenceIds),
+    [activeReferenceIds, attachments],
   );
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canSend) return;
-    if (canSubmit) {
-      const trimmed = input.trim();
-      const runOptions = runEnabledSkillNames
-        ? { enabledSkills: runEnabledSkillNames }
-        : undefined;
-      const prepared = prepareSubmit(trimmed, visibleAttachments);
-      if (trimmed) {
-        pushHistory(trimmed);
-      }
-      onSend(
-        prepared.message,
-        agentOptionValues,
-        prepared.attachments,
-        runOptions,
-      );
-      setInput("");
-      inputValueRef.current = "";
-      composerRef.current?.setPlainText("");
-      setActiveReferenceIds([]);
-      longTextResourcesRef.current.clear();
-      setRunEnabledSkillNames(null);
-      setAttachments([]);
-      setComposerExpanded(false);
-    }
-  };
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -661,6 +615,25 @@ export const ChatInput = memo(function ChatInput({
     !isLoading &&
     !hasUploadingAttachment &&
     !hasFailedAttachment;
+  const handleSubmit = useAcceptedDraftSubmission({
+    enabled: canSubmit,
+    input,
+    enabledSkillNames: runEnabledSkillNames,
+    composerRef,
+    inputValueRef,
+    longTextResourcesRef,
+    visibleAttachments,
+    activeReferenceIds,
+    agentOptionValues,
+    prepareSubmit,
+    pushHistory,
+    onSend,
+    setInput,
+    setActiveReferenceIds,
+    setRunEnabledSkillNames,
+    setAttachments,
+    setComposerExpanded,
+  });
   const composerPlaceholder = !canSend
     ? t("chat.noPermission")
     : mentionMode === "team"
@@ -771,9 +744,10 @@ export const ChatInput = memo(function ChatInput({
             onImageViewerOpen={(url) => setImageViewerSrc(url)}
             maxFiles={uploadLimits?.maxFiles}
             onRestoreLongText={handleRestoreLongTextAttachment}
-            onRemoveReference={(referenceId) =>
-              composerRef.current?.removeFileReference(referenceId)
-            }
+            onRemoveReference={(referenceId) => {
+              longTextResourcesRef.current.delete(referenceId);
+              composerRef.current?.removeFileReference(referenceId);
+            }}
             onRetryUpload={(attachment) => {
               if (attachment.composerReferenceId) {
                 handleRetryFileReference(attachment.composerReferenceId);
@@ -824,7 +798,17 @@ export const ChatInput = memo(function ChatInput({
                   availableSkills={availableRunSkills}
                   onApplySlashCommand={applySlashCommand}
                   onChange={handleComposerChange}
-                  filePaste={{ validateCount, onFiles: uploadFiles }}
+                  filePaste={{
+                    validateCount,
+                    onFiles: uploadFiles,
+                    onInvalidImage: () =>
+                      toast.error(
+                        t(
+                          "fileUpload.clipboardImageUnavailable",
+                          "无法读取剪贴板图片，请重新复制或保存后上传",
+                        ),
+                      ),
+                  }}
                   longTextPaste={{
                     enabled: !composerExpanded,
                     validateCount,

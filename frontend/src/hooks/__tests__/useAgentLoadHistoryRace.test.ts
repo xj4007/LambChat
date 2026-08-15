@@ -10,15 +10,25 @@ test("loadHistory ignores stale async results instead of overwriting the active 
   expect(source).toMatch(/loadHistoryRequestIdRef/);
   expect(source).toMatch(/isStaleHistoryLoad/);
   expect(source).toMatch(/loadHistoryRequestIdRef\.current \+= 1/);
+  expect(source).toMatch(
+    /const \[historyLoadGeneration, setHistoryLoadGeneration\]/,
+  );
+  expect(source).toMatch(
+    /const requestId = loadHistoryRequestIdRef\.current;[\s\S]*setHistoryLoadGeneration\(requestId\)/,
+  );
   expect(source).toMatch(/historyAbortControllerRef/);
   expect(source).toMatch(/historyAbortControllerRef\.current\?\.abort\(\)/);
   expect(source).toMatch(/const signal = historyAbortController\.signal/);
   expect(source).toMatch(
-    /Promise\.all\(\[\s*sessionApi\.get\(targetSessionId, \{ signal \}\),\s*sessionApi\.getEvents\(targetSessionId, \{[\s\S]*?include_active_user_message: true,[\s\S]*?signal,[\s\S]*?\}\),\s*\]\)/,
+    /Promise\.all\(\[\s*sessionApi\.get\(targetSessionId, \{ signal \}\),\s*sessionApi\.getEvents\(targetSessionId, \{[\s\S]*?include_active_user_message: true,[\s\S]*?compact_message_chunks: true,[\s\S]*?signal,[\s\S]*?\}\),\s*\]\)/,
   );
   expect(source).not.toMatch(/await markReadPromise/);
   expect(source).toMatch(/resolveHistoryStreamRunId/);
   expect(source).toMatch(/sseGenerationRef\.current \+= 1/);
+  expect(source).toMatch(
+    /if \(isStaleHistoryLoad\(\)\) return null;[\s\S]*?sessionData\.name[\s\S]*?dispatchSessionTitleUpdated/,
+  );
+  expect(source).toMatch(/historyLoadGeneration,/);
 });
 
 test("clearMessages clears loading flags when a history load is invalidated", () => {

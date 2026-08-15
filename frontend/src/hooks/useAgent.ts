@@ -25,6 +25,7 @@ import {
   type HistoryEvent,
   type UseAgentReturn,
   type ActiveGoalSpec,
+  type ChatSubmissionCallbacks,
 } from "./useAgent/types";
 import { applyRecommendQuestionsToMessages } from "./useAgent/recommendQuestionsUpdate";
 import {
@@ -54,6 +55,26 @@ import {
   resolveHistoryStreamRunId,
 } from "./useAgent/historyLoadState";
 
+function notifySubmissionAccepted(
+  submissionCallbacks?: ChatSubmissionCallbacks,
+): void {
+  try {
+    submissionCallbacks?.onAccepted();
+  } catch (error) {
+    console.error("Failed to clear accepted chat draft:", error);
+  }
+}
+
+function notifySubmissionRejected(
+  submissionCallbacks?: ChatSubmissionCallbacks,
+): void {
+  try {
+    submissionCallbacks?.onRejected?.();
+  } catch (error) {
+    console.error("Failed to restore rejected chat draft:", error);
+  }
+}
+
 export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   const { hasAnyPermission } = useAuth();
   const canReadFeedback = hasAnyPermission([
@@ -65,6 +86,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyLoadGeneration, setHistoryLoadGeneration] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -310,6 +332,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     async (targetSessionId: string, targetRunId?: string) => {
       loadHistoryRequestIdRef.current += 1;
       const requestId = loadHistoryRequestIdRef.current;
+      setHistoryLoadGeneration(requestId);
       const isStaleHistoryLoad = () =>
         requestId !== loadHistoryRequestIdRef.current || signal.aborted;
 
@@ -359,12 +382,19 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
           sessionApi.get(targetSessionId, { signal }),
           sessionApi.getEvents(targetSessionId, {
             include_active_user_message: true,
+            compact_message_chunks: true,
             signal,
           }),
         ]);
         if (isStaleHistoryLoad()) return null;
 
         if (sessionData) {
+          if (sessionData.name) {
+            dispatchSessionTitleUpdated({
+              sessionId: targetSessionId,
+              title: sessionData.name,
+            });
+          }
           setSessionId(targetSessionId);
           setCurrentProjectId(
             (sessionData.metadata?.project_id as string) || null,
@@ -492,8 +522,12 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       agentOptions?: Record<string, boolean | string | number>,
       attachments?: MessageAttachment[],
       runOptions?: { enabledSkills?: string[] },
+      submissionCallbacks?: ChatSubmissionCallbacks,
     ) => {
-      if (!content.trim()) return;
+      if (!content.trim()) {
+        notifySubmissionRejected(submissionCallbacks);
+        return;
+      }
       loadHistoryRequestIdRef.current += 1;
       historyAbortControllerRef.current?.abort();
       historyAbortControllerRef.current = null;
@@ -502,11 +536,13 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       if (goalPlan.handledWithoutSend) {
         if (goalPlan.errorKey) {
           setError(i18n.t(goalPlan.errorKey, "Please enter a goal"));
+          notifySubmissionRejected(submissionCallbacks);
           return;
         }
         setGoalModeEnabled(goalPlan.nextGoalModeEnabled);
         setActiveGoal(goalPlan.nextActiveGoal);
         setError(null);
+        notifySubmissionAccepted(submissionCallbacks);
         return;
       }
       content = goalPlan.content;
@@ -517,6 +553,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
         console.log(
           "[sendMessage] Already sending, ignoring duplicate request",
         );
+        notifySubmissionRejected(submissionCallbacks);
         return;
       }
       isSendingRef.current = true;
@@ -543,6 +580,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       setIsLoading(true);
       setError(null);
       let finalAssistantMessageId = assistantMessageId;
+      let submissionAccepted = false;
 
       try {
         // 用户发送消息时标记当前 session 为已读
@@ -597,6 +635,8 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
         const newSessionId = submitData.session_id;
         const newRunId = submitData.run_id;
         const projectId = pendingProjectIdRef.current;
+        submissionAccepted = true;
+        notifySubmissionAccepted(submissionCallbacks);
 
         if (goalForRun) {
           const goalWithRunId = {
@@ -739,6 +779,9 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
           ctx,
         );
       } catch (err) {
+        if (!submissionAccepted) {
+          notifySubmissionRejected(submissionCallbacks);
+        }
         if (err instanceof Error && err.name === "AbortError") {
           return;
         }
@@ -886,6 +929,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     messages,
     isLoading,
     isLoadingHistory,
+    historyLoadGeneration,
     error,
     sessionId,
     currentRunId,

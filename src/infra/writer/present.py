@@ -22,6 +22,7 @@ Writer 模块 - 统一流式输出 + 事件存储
 import asyncio
 from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence
 
+from src.infra.async_utils.background_tasks import BestEffortTaskLimiter
 from src.infra.logging import get_logger
 from src.infra.upload.file_record import FileRecordStorage
 
@@ -37,6 +38,32 @@ from src.infra.writer.presenter_events import EventPresenterMixin  # noqa: F401
 from src.infra.writer.presenter_storage import StoragePresenterMixin  # noqa: F401
 
 logger = get_logger(__name__)
+
+_user_message_search_index_tasks = BestEffortTaskLimiter(
+    "user-message-search-index",
+    max_tasks=64,
+)
+
+
+async def _append_user_message_search_content(session_id: str, content: str) -> None:
+    from src.infra.session.storage import SessionStorage
+
+    await SessionStorage().append_user_message_search_content(session_id, content)
+
+
+def schedule_user_message_search_index(
+    session_id: str,
+    content: str,
+) -> asyncio.Task[None]:
+    """Schedule rebuildable session search metadata after the message is durable."""
+    return _user_message_search_index_tasks.create_task(
+        _append_user_message_search_content(session_id, content)
+    )
+
+
+async def drain_user_message_search_index_tasks() -> None:
+    """Drain pending user-message search metadata writes during shutdown."""
+    await _user_message_search_index_tasks.drain()
 
 
 class Presenter(EventPresenterMixin, StoragePresenterMixin):
@@ -203,28 +230,48 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
         attachments: Optional[List[Dict[str, Any]]] = None,
         message_id: Optional[str] = None,
         enabled_skills: Optional[List[str]] = None,
+        attachment_references_claimed: bool = False,
+        schedule_search_index: bool = True,
     ) -> Dict[str, Any]:
         """输出用户消息并保存"""
-        event = self.present_user_message(
-            content, attachments, message_id=message_id, enabled_skills=enabled_skills
-        )
-        await self.save_event(event)
-        if self.config.session_id:
-            try:
-                from src.infra.session.storage import SessionStorage
-
-                await SessionStorage().append_user_message_search_content(
-                    self.config.session_id,
-                    content,
-                )
-            except Exception as e:
-                logger.warning("Failed to update session search index for user message: %s", e)
         attachment_keys = _extract_attachment_keys(attachments)
+        file_records: FileRecordStorage | None = None
+        claims_established = False
         if attachment_keys:
-            try:
-                await FileRecordStorage().add_references(attachment_keys)
-            except Exception as e:
-                logger.warning("Failed to track attachment references for user message: %s", e)
+            file_records = FileRecordStorage()
+            if attachment_references_claimed:
+                claims_established = True
+            else:
+                await file_records.claim_owned_references(
+                    attachment_keys,
+                    self.config.user_id or "",
+                )
+                claims_established = True
+
+        try:
+            event = self.present_user_message(
+                content,
+                attachments,
+                message_id=message_id,
+                enabled_skills=enabled_skills,
+            )
+            await self.save_event(event, raise_on_error=True)
+        except (Exception, asyncio.CancelledError):
+            if claims_established and file_records is not None:
+                try:
+                    await file_records.release_owned_references(
+                        attachment_keys,
+                        self.config.user_id or "",
+                    )
+                except Exception as rollback_error:
+                    logger.error(
+                        "Failed to roll back attachment references for user message: %s",
+                        rollback_error,
+                    )
+            raise
+
+        if self.config.session_id and schedule_search_index:
+            schedule_user_message_search_index(self.config.session_id, content)
         return event
 
     async def emit_skills_changed(

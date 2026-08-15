@@ -26,11 +26,7 @@ import { useDragAndDrop } from "./useDragAndDrop";
 import { useWebSocketNotifications } from "./useWebSocketNotifications";
 import { useAgentOptions } from "./useAgentOptions";
 import { useSessionSync } from "./useSessionSync";
-import {
-  getExternalNavigationPreviewRequest,
-  getExternalNavigationTargetFile,
-  shouldScrollToBottomAfterExternalNavigation,
-} from "./externalNavigationState";
+import { useExternalNavigationTarget } from "./useExternalNavigationTarget";
 import { resolveModelSelection, type ModelSelection } from "./modelSelection";
 import {
   applyLatestSessionLoadResult,
@@ -172,6 +168,7 @@ export function ChatAppContent({
     currentRunId,
     isLoading,
     isLoadingHistory,
+    historyLoadGeneration,
     agents,
     currentAgent,
     allowedModelIds: agentAllowedModelIds,
@@ -644,75 +641,12 @@ export function ChatAppContent({
     },
   });
 
-  const [externalNavigationTargetRunId, setExternalNavigationTargetRunId] =
-    useState<string | null>(null);
-  const [
-    externalNavigationTargetRunPending,
-    setExternalNavigationTargetRunPending,
-  ] = useState(false);
-  const externalNavigationTargetFile = getExternalNavigationTargetFile(
-    location.state,
-  );
-  const externalNavigationPreviewRequest = getExternalNavigationPreviewRequest(
-    location.state,
-  );
-  const externalScrollToBottom = shouldScrollToBottomAfterExternalNavigation(
-    location.state,
-  );
-  const externalNavigationRunId = searchParams.get("run_id")?.trim() || null;
-  const externalNavigationToken =
-    externalNavigationTargetFile ||
-    externalScrollToBottom ||
-    externalNavigationRunId
-      ? location.key
-      : null;
-  const resolvedExternalNavigationTargetRunId =
-    externalNavigationTargetRunId || externalNavigationRunId;
-
-  useEffect(() => {
-    const targetTraceId = externalNavigationTargetFile?.traceId ?? undefined;
-
-    if (!sessionId || !targetTraceId) {
-      setExternalNavigationTargetRunId(null);
-      setExternalNavigationTargetRunPending(false);
-      return;
-    }
-
-    let cancelled = false;
-    setExternalNavigationTargetRunPending(true);
-
-    const resolveTargetRunId = async () => {
-      try {
-        const { sessionApi } = await import("../../../services/api");
-        const response = await sessionApi.getRuns(sessionId, {
-          trace_id: targetTraceId,
-        });
-        if (cancelled) {
-          return;
-        }
-
-        const matchedRun =
-          response.runs.find((run) => run.trace_id === targetTraceId) ?? null;
-        setExternalNavigationTargetRunId(matchedRun?.run_id ?? null);
-        setExternalNavigationTargetRunPending(false);
-      } catch (err) {
-        if (!cancelled) {
-          console.warn(
-            "[AppContent] Failed to resolve external navigation run:",
-            err,
-          );
-          setExternalNavigationTargetRunId(null);
-          setExternalNavigationTargetRunPending(false);
-        }
-      }
-    };
-
-    resolveTargetRunId();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId, externalNavigationTargetFile?.traceId]);
+  const externalNavigation = useExternalNavigationTarget({
+    sessionId,
+    locationState: location.state,
+    locationKey: location.key,
+    routeRunId: searchParams.get("run_id"),
+  });
 
   const handleConfigRestored = useCallback(
     (
@@ -933,6 +867,7 @@ export function ChatAppContent({
           currentRunId={currentRunId}
           isLoading={isLoading}
           isLoadingHistory={isLoadingHistory}
+          historyLoadGeneration={historyLoadGeneration}
           connectionStatus={connectionStatus}
           canSendMessage={canSendMessage}
           tools={effectiveTools}
@@ -984,8 +919,19 @@ export function ChatAppContent({
           approvals={approvals}
           onRespondApproval={respondToApproval}
           approvalLoading={approvalLoading}
-          onSendMessage={(content, sendAttachments, runOptions) =>
-            void sendMessage(content, undefined, sendAttachments, runOptions)
+          onSendMessage={(
+            content,
+            sendAttachments,
+            runOptions,
+            submissionCallbacks,
+          ) =>
+            void sendMessage(
+              content,
+              undefined,
+              sendAttachments,
+              runOptions,
+              submissionCallbacks,
+            )
           }
           onStopGeneration={stopGeneration}
           activeGoal={activeGoal}
@@ -997,14 +943,20 @@ export function ChatAppContent({
           onToggleGoalMode={setGoalModeEnabled}
           attachments={pageDragAttachments}
           onAttachmentsChange={setPageDragAttachments}
-          externalNavigationToken={externalNavigationToken}
-          externalNavigationTargetFile={externalNavigationTargetFile}
-          externalNavigationPreview={externalNavigationPreviewRequest}
-          externalNavigationTargetRunId={resolvedExternalNavigationTargetRunId}
-          externalNavigationTargetRunPending={
-            externalNavigationTargetRunPending
+          externalNavigationToken={externalNavigation.externalNavigationToken}
+          externalNavigationTargetFile={
+            externalNavigation.externalNavigationTargetFile
           }
-          externalScrollToBottom={externalScrollToBottom}
+          externalNavigationPreview={
+            externalNavigation.externalNavigationPreview
+          }
+          externalNavigationTargetRunId={
+            externalNavigation.externalNavigationTargetRunId
+          }
+          externalNavigationTargetRunPending={
+            externalNavigation.externalNavigationTargetRunPending
+          }
+          externalScrollToBottom={externalNavigation.externalScrollToBottom}
           outlineToggleRef={outlineToggleRef}
         />
         <BlockPreviewPortal />

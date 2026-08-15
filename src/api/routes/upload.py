@@ -94,22 +94,28 @@ def _parse_bool(value: Any) -> bool:
 router = APIRouter()
 
 
-async def _get_live_record_by_hash(file_hash: str, storage=None) -> dict | None:
+async def _get_live_record_by_hash(
+    file_hash: str,
+    uploaded_by: str,
+    storage=None,
+) -> dict | None:
     """Return a dedupe record only if both metadata and the backing file still exist."""
-    record = await _file_record_storage.find_by_hash(file_hash)
+    record = await _file_record_storage.find_by_hash(file_hash, uploaded_by)
     if record is None:
         return None
 
     storage = storage or await get_or_init_storage()
     if await storage.file_exists(record["key"]):
-        return record
+        if await _file_record_storage.refresh_owned_cleanup(record["key"], uploaded_by):
+            return record
+        return None
 
     logger.warning(
         "Found stale file record for hash %s pointing to missing key %s",
         file_hash,
         record["key"],
     )
-    await _file_record_storage.delete_by_hash(file_hash)
+    await _file_record_storage.delete_by_hash(file_hash, uploaded_by)
     return None
 
 
@@ -274,6 +280,9 @@ async def _spool_upload_file_limited(
             digest.update(chunk)
             await run_blocking_io(spooled.write, chunk)
 
+        if total_size == 0:
+            raise HTTPException(status_code=400, detail=f"{purpose} is empty")
+
         await run_blocking_io(spooled.seek, 0)
         return SpooledUpload(file=spooled, sha256_hex=digest.hexdigest(), size=total_size)
     except Exception:
@@ -392,7 +401,7 @@ async def check_file_exists(
     current_user: TokenPayload = Depends(get_current_user_required),
 ) -> dict:
     storage = await get_or_init_storage()
-    record = await _get_live_record_by_hash(body.hash, storage)
+    record = await _get_live_record_by_hash(body.hash, current_user.sub, storage)
     if record is None:
         return {"exists": False}
     base_url = _get_base_url(request)
@@ -492,7 +501,7 @@ async def upload_file(
         file_hash = spooled_upload.sha256_hex
 
         # Check if hash already exists (race condition guard)
-        existing = await _get_live_record_by_hash(file_hash, storage)
+        existing = await _get_live_record_by_hash(file_hash, current_user.sub, storage)
         if existing:
             return _build_upload_response(
                 request,
@@ -540,20 +549,23 @@ async def upload_file(
             mime_type=file.content_type or "application/octet-stream",
             size=spooled_upload.size,
         )
-    except DuplicateKeyError:
+    except DuplicateKeyError as duplicate_error:
         logger.info("Duplicate upload detected for hash %s, reusing existing file", file_hash)
 
-        existing = await _get_live_record_by_hash(file_hash, storage)
-        if existing:
-            try:
+        existing = await _get_live_record_by_hash(file_hash, current_user.sub, storage)
+        duplicate_pattern = (duplicate_error.details or {}).get("keyPattern", {})
+        is_owner_hash_conflict = duplicate_pattern == {"uploaded_by": 1, "hash": 1}
+        try:
+            if storage_key and is_owner_hash_conflict:
                 await storage.delete_file(storage_key)
-            except Exception as cleanup_error:
-                logger.warning(
-                    "Failed to delete duplicate uploaded object %s after dedupe race: %s",
-                    storage_key,
-                    cleanup_error,
-                )
+        except Exception as cleanup_error:
+            logger.warning(
+                "Failed to delete duplicate uploaded object %s after dedupe race: %s",
+                storage_key,
+                cleanup_error,
+            )
 
+        if existing:
             return _build_upload_response(
                 request,
                 key=existing["key"],
@@ -745,33 +757,19 @@ async def delete_file(
     Returns:
         Deletion status
     """
-    storage = await get_or_init_storage()
+    record = await _file_record_storage.find_by_key(key, current_user.sub)
+    if record is None:
+        raise HTTPException(status_code=404, detail="File not found")
 
-    record = await _file_record_storage.find_by_key(key)
-    if record is not None:
-        if record.get("reference_count", 0) <= 0:
-            await storage.delete_file(key)
-            await _file_record_storage.delete_by_key(key)
-            logger.info("Deleted unreferenced file %s", key)
-            return {"deleted": True, "key": key, "status": "deleted"}
-
-        logger.info(
-            "Preserving tracked file %s during delete request to avoid breaking deduplicated references",
-            key,
-        )
+    if record.get("reference_count", 0) > 0:
+        logger.info("Preserving referenced file %s during delete request", key)
         return {"deleted": False, "key": key, "status": "preserved"}
 
-    # Async delete - return immediately, delete in background
-    async def background_delete():
-        try:
-            await storage.delete_file(key)
-            await _file_record_storage.delete_by_key(key)
-            logger.info(f"Background delete completed for key: {key}")
-        except Exception as e:
-            logger.error(f"Background delete failed for key {key}: {e}")
+    if not await _file_record_storage.schedule_owned_cleanup(key, current_user.sub):
+        raise HTTPException(status_code=404, detail="File not found")
 
-    _upload_delete_tasks.create_task(background_delete())
-    return {"deleted": True, "key": key, "status": "deleting"}
+    logger.info("Scheduled unreferenced file %s for delayed cleanup", key)
+    return {"deleted": False, "key": key, "status": "scheduled"}
 
 
 @router.get("/config")

@@ -10,7 +10,7 @@ import { SessionImageGalleryProvider } from "../../chat/ChatMessage/sessionImage
 import { PersistentToolPanelHost } from "../../chat/ChatMessage/items/persistentToolPanelState";
 import { ChatInput } from "../../chat/ChatInput";
 import { WelcomePage } from "../../chat/WelcomePage";
-import { Virtuoso, type ListRange } from "react-virtuoso";
+import { Virtuoso } from "react-virtuoso";
 import { ApprovalPanel } from "../../panels/ApprovalPanel";
 import { SessionScheduledTasksButton } from "../../panels/ScheduledTaskPanel";
 import {
@@ -20,7 +20,6 @@ import {
 import { useMessageScroll } from "./useMessageScroll";
 import {
   getAtBottomThresholdPx,
-  getInitialBottomItemLocation,
   getMessageListFooterSpacerClass,
 } from "./messageScrollUtils";
 import { getNextMessageListSessionKey } from "./useMessageScroll";
@@ -52,6 +51,7 @@ export function ChatView({
   currentRunId,
   isLoading,
   isLoadingHistory,
+  historyLoadGeneration,
   connectionStatus,
   canSendMessage,
   tools,
@@ -167,7 +167,6 @@ export function ChatView({
   const [messageListSessionKey, setMessageListSessionKey] = useState(
     sessionId ?? "__new_session__",
   );
-  const [visibleRange, setVisibleRange] = useState<ListRange | null>(null);
 
   const {
     messagesContainerRef,
@@ -176,7 +175,6 @@ export function ChatView({
     messagesEndRef,
     isNearBottom,
     isNearTop,
-    isHistoryScrollSettling,
     handleVirtuosoAtBottomChange,
     scrollToBottom,
     scrollToTop,
@@ -189,6 +187,7 @@ export function ChatView({
     externalNavigationTargetRunPending,
     externalScrollToBottom,
     isLoadingHistory,
+    historyLoadGeneration,
     null,
   );
 
@@ -224,9 +223,8 @@ export function ChatView({
   );
 
   // --- Outline panel (side effects managed by hook) ---
-  useChatOutline(
+  const { handleVisibleRangeChange } = useChatOutline(
     messages,
-    visibleRange,
     virtuosoRef,
     assistantIdentity.avatar,
     outlineToggleRef,
@@ -260,8 +258,6 @@ export function ChatView({
   );
   const isMobileViewport =
     typeof window !== "undefined" ? window.innerWidth < 640 : false;
-  const shouldHideHistoryMeasurementFrame =
-    isLoadingHistory || isHistoryScrollSettling;
 
   // --- Message action handlers ---
   const handleForkMessage = useCallback(
@@ -307,22 +303,14 @@ export function ChatView({
   );
 
   // --- Virtuoso rendering ---
-  const handleVirtuosoRangeChanged = useCallback((range: ListRange) => {
-    setVisibleRange((current) =>
-      current?.startIndex === range.startIndex &&
-      current?.endIndex === range.endIndex
-        ? current
-        : range,
-    );
-  }, []);
   const handleVirtuosoFollowOutput = useCallback(
     (isAtBottom: boolean) => {
-      if (shouldHideHistoryMeasurementFrame) {
+      if (isLoadingHistory) {
         return isAtBottom ? "auto" : false;
       }
       return isAtBottom ? "smooth" : false;
     },
-    [shouldHideHistoryMeasurementFrame],
+    [isLoadingHistory],
   );
 
   const virtuosoComponents = useMemo(
@@ -414,7 +402,9 @@ export function ChatView({
       _options?: Record<string, boolean | string | number>,
       sendAttachments?: MessageAttachment[],
       runOptions?: { enabledSkills?: string[] },
-    ) => onSendMessage(content, sendAttachments, runOptions),
+      submissionCallbacks?: Parameters<ChatViewProps["onSendMessage"]>[3],
+    ) =>
+      onSendMessage(content, sendAttachments, runOptions, submissionCallbacks),
     onStop: onStopGeneration,
     isLoading: sessionRunning,
     canSend: canSendMessage,
@@ -518,33 +508,19 @@ export function ChatView({
             />
           )
         ) : (
-          <>
-            <Virtuoso
-              key={messageListSessionKey}
-              ref={virtuosoRef}
-              className={`dark:divide-stone-800 overflow-x-hidden ${
-                shouldHideHistoryMeasurementFrame
-                  ? "chat-history-scroll-settling"
-                  : ""
-              }`}
-              data={messages}
-              computeItemKey={(_, message) => message.id}
-              atBottomStateChange={handleVirtuosoAtBottomChange}
-              atBottomThreshold={getAtBottomThresholdPx(isMobileViewport)}
-              followOutput={handleVirtuosoFollowOutput}
-              rangeChanged={handleVirtuosoRangeChanged}
-              components={virtuosoComponents}
-              itemContent={virtuosoItemContent}
-              initialTopMostItemIndex={getInitialBottomItemLocation(
-                messages.length,
-              )}
-            />
-            {shouldHideHistoryMeasurementFrame && (
-              <div className="chat-history-settling-overlay">
-                <ChatSkeleton count={8} />
-              </div>
-            )}
-          </>
+          <Virtuoso
+            key={messageListSessionKey}
+            ref={virtuosoRef}
+            className="dark:divide-stone-800 overflow-x-hidden"
+            data={messages}
+            computeItemKey={(_, message) => message.id}
+            atBottomStateChange={handleVirtuosoAtBottomChange}
+            atBottomThreshold={getAtBottomThresholdPx(isMobileViewport)}
+            followOutput={handleVirtuosoFollowOutput}
+            rangeChanged={handleVisibleRangeChange}
+            components={virtuosoComponents}
+            itemContent={virtuosoItemContent}
+          />
         )}
       </main>
 
@@ -564,7 +540,7 @@ export function ChatView({
       <PersistentToolPanelHost />
 
       {/* ChatInput at bottom (when messages exist, WelcomePage renders its own) */}
-      {messages.length > 0 && !shouldHideHistoryMeasurementFrame && (
+      {messages.length > 0 && (
         <div className="relative">
           <div
             className={`absolute ${FLOATING_SCROLL_BUTTON_OFFSET_CLASS} right-2 z-50 flex flex-col gap-2 sm:right-4`}

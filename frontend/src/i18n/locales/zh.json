@@ -225,15 +225,15 @@
   "agents": {
     "fast": {
       "description": "无沙箱，响应更快，适合日常对话",
-      "name": "Fast Agent"
+      "name": "快速助手"
     },
     "search": {
       "description": "支持代码解释器和沙箱，适合复杂任务",
-      "name": "Search Agent"
+      "name": "搜索助手"
     },
     "team": {
       "description": "按角色分派子代理，无团队时回退到单代理模式",
-      "name": "Team Agent"
+      "name": "团队助手"
     }
   },
   "appName": "LambChat",
@@ -392,6 +392,7 @@
     "fileUploadNoPermission": "没有上传 {{category}} 文件的权限",
     "fileUrlFailed": "生成文件链接失败",
     "instanceNameRequired": "实例名称为必填项",
+    "invalidAttachments": "一个或多个附件已失效或无法访问，请移除后重新上传。",
     "invalidCredentials": "用户名或密码错误",
     "invalidDisabledTools": "无效的禁用工具列表",
     "invalidEnvKeyFormat": "环境变量名格式无效",
@@ -1276,9 +1277,13 @@
     "composerRetry": "重试",
     "composerUploadFailed": "上传失败",
     "composerUploading": "上传中",
+    "preparing": "正在处理图片…",
+    "serverProcessing": "服务器处理中…",
     "dragDrop": "拖拽文件到这里或点击上传",
     "dragDropHint": "拖放文件到此处",
     "dragDropOr": "或点击下方按钮选择",
+    "clipboardImageUnavailable": "无法读取剪贴板图片，请重新复制，或保存图片后上传。",
+    "emptyFile": "文件内容为空，无法上传。",
     "effectiveLimits": "上传限制：图片 {{image}}MB / 视频 {{video}}MB / 音频 {{audio}}MB / 文档 {{document}}MB / 最多 {{maxFiles}} 个文件",
     "fileTooLarge": "文件大小超过限制",
     "maxFilesSummary": "单次最多上传 {{maxFiles}} 个文件",
@@ -2281,9 +2286,10 @@
     "LANGSMITH_PROJECT": "LangSmith 项目名称",
     "LANGSMITH_SAMPLE_RATE": "LangSmith 采样率（0.0-1.0）",
     "LANGSMITH_TRACING": "启用 LangSmith 追踪",
-    "LLM_MAX_RETRIES": "LLM API 最大重试次数（用于处理 429 等错误）",
+    "LLM_MAX_RETRIES": "首次 LLM 调用失败后的重试次数（超时、网络、限流和 5xx）",
     "LLM_MODEL_CACHE_SIZE": "LLM 模型实例缓存大小（每个实例约 10-30MB）。默认 50，支持多用户/多参数场景。设置过小会频繁创建/销毁实例，设置过大会占用更多内存。",
     "LLM_RETRY_DELAY": "LLM API 重试基础等待时间（秒，指数退避起始值）",
+    "LLM_REQUEST_TIMEOUT": "等待流式首事件或完整非流式响应的最长秒数",
     "LOCAL_STORAGE_PATH": "未启用 S3 时的本地存储路径（默认：./uploads）",
     "LOG_LEVEL": "日志级别（DEBUG, INFO, WARNING, ERROR）",
     "MCP_EFFECTIVE_CONFIG_MAX_SERVERS": "有效配置中允许的最大 MCP 服务器数量",
@@ -2357,8 +2363,6 @@
     "POSTGRES_POOL_MIN_SIZE": "PostgreSQL 连接池最小大小",
     "POSTGRES_PORT": "PostgreSQL 端口",
     "POSTGRES_USER": "PostgreSQL 用户名",
-    "PROMPT_CACHE_MAX_SYSTEM_BLOCKS": "最大缓存系统提示块数",
-    "PROMPT_CACHE_MAX_TOOLS": "最大缓存工具定义数",
     "RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS": "生成推荐追问的最大并发后台任务数",
     "REDIS_PASSWORD": "Redis 密码",
     "REDIS_URL": "Redis 连接 URL",

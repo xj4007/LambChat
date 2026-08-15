@@ -12,7 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_required
+from src.api.server_timing import timed_server_phase
 from src.infra.folder.storage import get_project_storage
+from src.infra.llm.retry import ainvoke_with_retry
 from src.infra.logging import get_logger
 from src.infra.session.favorites import is_session_favorite, normalize_session_metadata
 from src.infra.session.manager import SessionManager
@@ -51,49 +53,6 @@ def _parse_event_types_filter(event_types: str | None) -> list[str] | None:
         if len(parsed) >= SESSION_EVENT_TYPE_FILTER_LIMIT:
             break
     return parsed or None
-
-
-def _is_retryable_error(error: Exception) -> bool:
-    """判断错误是否可重试（429、网络错误等）"""
-    error_str = str(error).lower()
-    retryable_patterns = [
-        "429",  # rate limit
-        "503",  # service unavailable
-        "502",  # bad gateway
-        "504",  # gateway timeout
-        "timeout",
-        "connection",
-        "overloaded",
-        "网络错误",  # Chinese API proxy network error
-        "network error",
-    ]
-    return any(pattern in error_str for pattern in retryable_patterns)
-
-
-async def _ainvoke_with_retry(model, prompt: str, max_retries: int | None = None) -> Any:
-    """带重试的 LLM 调用"""
-
-    if max_retries is None:
-        max_retries = getattr(settings, "LLM_MAX_RETRIES", 3)
-
-    last_error: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            return await model.ainvoke(prompt)
-        except Exception as e:
-            last_error = e
-            if _is_retryable_error(e) and attempt < max_retries - 1:
-                delay = settings.LLM_RETRY_DELAY * (2**attempt)  # 指数退避
-                logger.warning(
-                    f"LLM call failed (attempt {attempt + 1}/{max_retries}): {e}. "
-                    f"Retrying in {delay}s..."
-                )
-                await asyncio.sleep(delay)
-            else:
-                raise
-    if last_error is None:
-        raise RuntimeError("Unexpected state: no error but loop exhausted")
-    raise last_error
 
 
 def verify_session_ownership(session: Session, user: TokenPayload) -> None:
@@ -166,18 +125,35 @@ async def list_sessions(
 
     # 所有用户只能查看自己的会话
     filter_user_id = user.sub
-    favorites_project_id = await _get_favorites_project_id(user.sub)
-
-    sessions, total = await manager.list_sessions(
-        user_id=filter_user_id,
-        skip=skip,
-        limit=limit,
-        is_active=is_active,
-        project_id=project_id,
-        search=search,
-        favorites_only=favorites_only,
-        favorites_project_id=favorites_project_id,
-    )
+    async with timed_server_phase("session_list"):
+        if favorites_only:
+            favorites_project_id = await _get_favorites_project_id(user.sub)
+            sessions, total = await manager.list_sessions(
+                user_id=filter_user_id,
+                skip=skip,
+                limit=limit,
+                is_active=is_active,
+                project_id=project_id,
+                search=search,
+                favorites_only=favorites_only,
+                favorites_project_id=favorites_project_id,
+            )
+        else:
+            favorites_project_id, list_result = await asyncio.gather(
+                _get_favorites_project_id(user.sub),
+                manager.list_sessions(
+                    user_id=filter_user_id,
+                    skip=skip,
+                    limit=limit,
+                    is_active=is_active,
+                    project_id=project_id,
+                    search=search,
+                    favorites_only=favorites_only,
+                    favorites_project_id=None,
+                ),
+            )
+            sessions, total = list_result
+            sessions = [_normalize_session(session, favorites_project_id) for session in sessions]
 
     return {
         "sessions": sessions,
@@ -225,12 +201,15 @@ async def get_session(
     只能获取自己拥有的会话，管理员可以获取任意会话。
     """
     manager = SessionManager()
-    session = await manager.get_session(session_id)
+    async with timed_server_phase("session_detail"):
+        session, favorites_project_id = await asyncio.gather(
+            manager.get_session(session_id),
+            _get_favorites_project_id(user.sub),
+        )
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
     verify_session_ownership(session, user)
-    favorites_project_id = await _get_favorites_project_id(user.sub)
     return _normalize_session(session, favorites_project_id)
 
 
@@ -273,13 +252,16 @@ async def mark_session_read(
 ):
     """将会话标记为已读（清除未读计数）"""
     manager = SessionManager()
-    session = await manager.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    async with timed_server_phase("session_mark_read"):
+        if await manager.mark_read_for_user(session_id, user.sub):
+            return {"status": "ok"}
 
-    verify_session_ownership(session, user)
-
-    await manager.mark_read(session_id)
+        # Keep the previous 404/403 distinction on the uncommon miss path.
+        session = await manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        verify_session_ownership(session, user)
+        await manager.mark_read(session_id)
     return {"status": "ok"}
 
 
@@ -303,6 +285,7 @@ async def get_session_events(
         False,
         description="包含活动 run 的用户消息，并返回是否需要继续 SSE 回放",
     ),
+    compact_message_chunks: bool = False,
     user: TokenPayload = Depends(get_current_user_required),
 ):
     """
@@ -319,7 +302,8 @@ async def get_session_events(
     from src.infra.session.dual_writer import get_dual_writer
 
     manager = SessionManager()
-    session = await manager.get_session(session_id)
+    async with timed_server_phase("session_detail"):
+        session = await manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -334,32 +318,37 @@ async def get_session_events(
     events_probe_limit = (limit + 1) if limit is not None else None
     history_mode = None
     stream_run_id = None
-    if include_active_user_message:
-        snapshot = await dual_writer.read_session_events_snapshot(
-            session_id,
-            types_list,
-            run_id=run_id,
-            exclude_run_id=exclude_run_id,
-            completed_only=True,
-            max_events=events_probe_limit,
-            active_run_id=current_run_id,
-        )
-        events = snapshot.events
-        history_mode = snapshot.history_mode
-        stream_run_id = snapshot.stream_run_id
-    else:
-        # 兼容旧调用方：活动 trace 继续由 stream 单独读取，避免重复事件。
-        events = await dual_writer.read_session_events(
-            session_id,
-            types_list,
-            run_id=run_id,
-            exclude_run_id=exclude_run_id,
-            completed_only=True,
-            max_events=events_probe_limit,
-        )
+    async with timed_server_phase("history"):
+        if include_active_user_message:
+            snapshot = await dual_writer.read_session_events_snapshot(
+                session_id,
+                types_list,
+                run_id=run_id,
+                exclude_run_id=exclude_run_id,
+                completed_only=True,
+                max_events=events_probe_limit,
+                active_run_id=current_run_id,
+            )
+            events = snapshot.events
+            history_mode = snapshot.history_mode
+            stream_run_id = snapshot.stream_run_id
+        else:
+            # 兼容旧调用方：活动 trace 继续由 stream 单独读取，避免重复事件。
+            events = await dual_writer.read_session_events(
+                session_id,
+                types_list,
+                run_id=run_id,
+                exclude_run_id=exclude_run_id,
+                completed_only=True,
+                max_events=events_probe_limit,
+            )
     events_limited = limit is not None and len(events) > limit
     if events_limited:
         events = events[:limit]
+    if compact_message_chunks:
+        from src.infra.session.history_compaction import compact_consecutive_message_chunks
+
+        events = compact_consecutive_message_chunks(events)
 
     response = {
         "events": events,
@@ -783,7 +772,7 @@ async def generate_session_title(
         )
         prompt = prompt_template.replace("{lang}", lang).replace("{message}", message[:800])
 
-        response = await _ainvoke_with_retry(model, prompt)
+        response = await ainvoke_with_retry(model, prompt, operation="session-title")
         logger.debug("LLM 生成标题响应: %s", response)
 
         # 提取标题，兼容新旧格式
